@@ -1,0 +1,969 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Шмэлькa | @hairpin01
+
+from __future__ import annotations
+
+import asyncio
+import getpass
+import os
+import re
+import socket
+import subprocess
+import tempfile
+import time
+from datetime import datetime
+from typing import Any
+
+try:
+    import psutil as _psutil
+except ImportError:
+    _psutil = None
+
+from telethon.tl.types import InputMediaWebPage
+
+import utils
+from utils.strings import Strings
+from core.lib.loader.module_base import ModuleBase, callback, command
+from core.lib.loader.module_config import (
+    Boolean,
+    ConfigValue,
+    ModuleConfig,
+    Placeholders,
+    String,
+)
+
+
+def _detect_branch_sync():
+    try:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=base_dir,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "main"
+
+
+CUSTOM_EMOJI = {
+    "📝": '<tg-emoji emoji-id="5334882760735598374">📝</tg-emoji>',
+    "📁": '<tg-emoji emoji-id="5433653135799228968">📁</tg-emoji>',
+    "📚": '<tg-emoji emoji-id="5373098009640836781">📚</tg-emoji>',
+    "📖": '<tg-emoji emoji-id="5226512880362332956">📖</tg-emoji>',
+    "🖨": '<tg-emoji emoji-id="5386494631112353009">🖨</tg-emoji>',
+    "☑️": '<tg-emoji emoji-id="5454096630372379732">☑️</tg-emoji>',
+    "💬": '<tg-emoji emoji-id="5465300082628763143">💬</tg-emoji>',
+    "🗯": '<tg-emoji emoji-id="5465132703458270101">🗯</tg-emoji>',
+    "✏️": '<tg-emoji emoji-id="5334673106202010226">✏️</tg-emoji>',
+    "🐢": '<tg-emoji emoji-id="5350813992732338949">🐢</tg-emoji>',
+    "🧊": '<tg-emoji emoji-id="5404728536810398694">🧊</tg-emoji>',
+    "❄️": '<tg-emoji emoji-id="5431895003821513760">❄️</tg-emoji>',
+    "📎": '<tg-emoji emoji-id="5377844313575150051">📎</tg-emoji>',
+    "🗳": '<tg-emoji emoji-id="5359741159566484212">🗳</tg-emoji>',
+    "📰": '<tg-emoji emoji-id="5433982607035474385">📰</tg-emoji>',
+    "🛰": '<tg-emoji emoji-id="5321304062715517873">🛰</tg-emoji>',
+}
+
+
+class _FakeEventProxy:
+    """Proxies an event and logs all method calls and attribute accesses."""
+
+    def __init__(self, original, *, fake_text=None):
+        self._orig = original
+        self._fake_text = fake_text
+        self._call_log = []
+
+    def _log(self, msg):
+        self._call_log.append(msg)
+
+    def get_log(self):
+        return list(self._call_log)
+
+    def __getattr__(self, name):
+        if name == "text" and self._fake_text is not None:
+            self._log(f"[ATTR] text -> '{self._fake_text}' (fake)")
+            return self._fake_text
+        if name.startswith("_"):
+            raise AttributeError(name)
+        orig_attr = getattr(self._orig, name)
+        if not callable(orig_attr):
+            self._log(f"[ATTR] {name} = {orig_attr!r}")
+            return orig_attr
+        if asyncio.iscoroutinefunction(orig_attr):
+
+            async def async_wrapper(*args, **kwargs):
+                self._log(f"[CALL] {name}(args={args}, kwargs={kwargs})")
+                try:
+                    result = await orig_attr(*args, **kwargs)
+                    self._log(f"[RESULT] {name} -> {result!r}")
+                    return result
+                except Exception as e:
+                    self._log(f"[ERROR] {name} -> {e}")
+                    raise
+
+            return async_wrapper
+        else:
+
+            def sync_wrapper(*args, **kwargs):
+                self._log(f"[CALL] {name}(args={args}, kwargs={kwargs})")
+                try:
+                    result = orig_attr(*args, **kwargs)
+                    self._log(f"[RESULT] {name} -> {result!r}")
+                    return result
+                except Exception as e:
+                    self._log(f"[ERROR] {name} -> {e}")
+                    raise
+
+            return sync_wrapper
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._orig, name, value)
+
+
+class TesterMod(ModuleBase):
+    name = "tester"
+    version = "1.0.0"
+    author = "@hairpin00"
+
+    async def on_load(self) -> None:
+        branch = _detect_branch_sync()
+        config_dict = await self.kernel.get_module_config(
+            self.name,
+            {
+                "quote_media": False,
+                "invert_media": False,
+                "custom_text": "",
+                "placeholders": "",
+                "start_emoji": "✏️",
+                "banner_url": f"https://raw.githubusercontent.com/hairpin01/MCUB-fork/refs/heads/{branch}/img/ping.png",
+                "start_banner_url": "",
+            },
+        )
+        utils.register_decorated_placeholders(self.name, self)
+        config_dict["placeholders"] = utils.format_placeholders(self.name)
+        self.config.from_dict(config_dict)
+        config_dict_clean = {
+            k: v for k, v in self.config.to_dict().items() if v is not None
+        }
+        if config_dict_clean:
+            await self.kernel.save_module_config(self.name, config_dict_clean)
+        self.kernel.store_module_config_schema(self.name, self.config)
+
+    async def on_unload(self) -> None:
+        utils.unregister_scope(self.name)
+
+    description: dict[str, str] = {
+        "ru": "Тecтep мoдyль (пинг, лoги, зaмopoзкa)",
+        "en": "Tester module (ping, logs, freezing)",
+    }
+
+    config = ModuleConfig(
+        ConfigValue(
+            "quote_media",
+            False,
+            description="Send media with quote in .ping",
+            validator=Boolean(default=False),
+        ),
+        ConfigValue(
+            "invert_media",
+            False,
+            description="Invert media colors",
+            validator=Boolean(default=False),
+        ),
+        ConfigValue(
+            "banner_url",
+            "",
+            description="Banner image URL for inline preview",
+            validator=String(default=""),
+        ),
+        ConfigValue(
+            "start_banner_url",
+            "",
+            description="Start banner image URL for inline preview",
+            validator=String(default=""),
+        ),
+        ConfigValue(
+            "custom_text",
+            "",
+            description=(
+                "Custom text for .ping. Available placeholders:\n"
+                "{ping_time}, {uptime}, {system_user}, {hostname},\n"
+                "{cpu_usage}, {ram_usage}, {branch}, {commit_sha},\n"
+                "{now_date}, {now_time}, {now_day}, {now_month},\n"
+                "{now_month_name}, {now_year}, {now_weekday},\n"
+                "{now_hour}, {now_minute}, {now_second}"
+            ),
+            validator=Placeholders(default="", placeholder_scope="any"),
+        ),
+        ConfigValue(
+            "placeholders",
+            "",
+            description="Available placeholders (auto-generated, read-only)",
+            validator=String(default=""),
+        ),
+        ConfigValue(
+            "start_emoji",
+            "✏️",
+            description="Start emoji for .ping",
+            validator=String(default="✏️"),
+        ),
+    )
+
+    strings: dict[str, dict[str, str]] | Strings = {"name": "tester"}
+
+    log_level_pattern = re.compile(r"^\d{4}-\d{2}-\d{2} .* \[([A-Z]+)\] ")
+    log_level_labels = ["debug", "info", "warning", "error", "critical", "all"]
+
+    def _get_branch(self) -> str:
+        return _detect_branch_sync()
+
+    def _normalize_log_level(self, value: str | None) -> str | None:
+        if not value:
+            return None
+        value = value.strip().lower()
+        return value if value in self.log_level_labels else None
+
+    def _build_filtered_log(self, level: str, kernel_log_path: str) -> str | None:
+        if level == "all":
+            return kernel_log_path
+
+        temp_path = os.path.join(tempfile.gettempdir(), f"kernel.{level}.log")
+        temp = open(temp_path, "w", encoding="utf-8")
+        keep_block = False
+        wrote = False
+        try:
+            with open(kernel_log_path, encoding="utf-8", errors="ignore") as src:
+                for line in src:
+                    match = self.log_level_pattern.match(line)
+                    if match:
+                        keep_block = match.group(1).lower() == level
+                    if keep_block:
+                        temp.write(line)
+                        wrote = True
+            temp.close()
+            if not wrote:
+                os.unlink(temp_path)
+                return None
+            return temp_path
+        except Exception:
+            try:
+                temp.close()
+                os.unlink(temp_path)
+            except Exception:
+                pass
+            raise
+
+    async def _resolve_version_info(self):
+        version_info = self.cache.get("tester:version_info")
+        if (
+            version_info is None
+            or not isinstance(version_info, tuple)
+            or len(version_info) != 3
+        ):
+            branch = await self.kernel.version_manager.detect_branch()
+            commit_sha = await self.kernel.version_manager.get_commit_sha()
+            commit_url = await self.kernel.version_manager.get_github_commit_url()
+            version_info = (branch, commit_sha, commit_url)
+            self.cache.set("tester:version_info", version_info, ttl=600)
+        return version_info
+
+    async def _send_logs(self, target: Any, level: str):
+        kernel_log_path = os.path.join(self.kernel.LOGS_DIR, "kernel.log")
+        if not os.path.exists(kernel_log_path):
+            await target.edit(
+                self.strings("logs_not_found", file=CUSTOM_EMOJI["📁"]),
+                parse_mode="html",
+            )
+            return
+
+        if os.path.getsize(kernel_log_path) == 0:
+            await target.edit(
+                f"{CUSTOM_EMOJI['🗳']} {self.strings('file_empty')}",
+                parse_mode="html",
+            )
+            return
+
+        selected_path = self._build_filtered_log(level, kernel_log_path)
+        if selected_path is None:
+            await target.edit(
+                f"{CUSTOM_EMOJI['🗳']} {self.strings('file_empty')}",
+                parse_mode="html",
+            )
+            return
+
+        temporary_file = selected_path != kernel_log_path
+        try:
+            branch, commit_sha, commit_url = await self._resolve_version_info()
+            await target.edit(
+                self.strings(
+                    "logs_level_caption",
+                    logs_title=CUSTOM_EMOJI["📝"],
+                    logs=self.strings("logs"),
+                    mcub=await self._mcub_handler(),
+                    pen=CUSTOM_EMOJI["✏️"],
+                    kernel_version=self.strings("kernel_version"),
+                    version=self.kernel.VERSION,
+                    commit_url=commit_url,
+                    commit_sha=commit_sha,
+                    satellite=CUSTOM_EMOJI["🛰"],
+                    branch_label=self.strings("branch"),
+                    branch=branch,
+                    printer=CUSTOM_EMOJI["🖨"],
+                    level=level.upper(),
+                ),
+                file=selected_path,
+                parse_mode="html",
+            )
+        finally:
+            if temporary_file:
+                try:
+                    os.unlink(selected_path)
+                except OSError:
+                    pass
+
+    async def _mcub_handler(self) -> str:
+        me = self.cache.get("tester:me")
+        if me is None:
+            me = await self.kernel.client.get_me()
+            self.cache.set("tester:me", me, ttl=3600)
+        return (
+            '<tg-emoji emoji-id="5470015630302287916">🔮</tg-emoji><tg-emoji emoji-id="5469945764069280010">🔮</tg-emoji><tg-emoji emoji-id="5469943045354984820">🔮</tg-emoji><tg-emoji emoji-id="5469879466954098867">🔮</tg-emoji>'
+            if me.premium
+            else "MCUB"
+        )
+
+    def _resolve_ping_start_emoji(self) -> str:
+        raw = self.config.get("start_emoji") or "✏️"
+        if not isinstance(raw, str):
+            return "✏️"
+        value = raw.strip()
+        if not value:
+            return "✏️"
+        return CUSTOM_EMOJI.get(value, value)
+
+    def _get_cpu_ram(self) -> tuple[str, str]:
+        cpu_usage = "N/A"
+        ram_usage = "N/A"
+        try:
+            if _psutil is not None:
+                cpu_usage = f"{_psutil.cpu_percent(interval=0.1)}%"
+                ram = _psutil.virtual_memory()
+                ram_usage = f"{ram.percent}%"
+        except Exception:
+            pass
+        return cpu_usage, ram_usage
+
+    @command("ping", doc_ru="пpoвepить зaдepжкy бoтa", doc_en="check bot latency")
+    async def cmd_ping(self, event: Any) -> None:
+        try:
+            start_banner_url = self.config.get("start_banner_url")
+            banner_url = self.config.get("banner_url")
+            quote_media = self.config.get("quote_media") or False
+            invert_media = self.config.get("invert_media") or False
+            start_time = time.time()
+            if quote_media and start_banner_url:
+                msg = await event.edit(
+                    self._resolve_ping_start_emoji(),
+                    parse_mode="html",
+                    file=InputMediaWebPage(start_banner_url, optional=True),
+                    invert_media=invert_media,
+                )
+            elif start_banner_url:
+                msg = await event.edit(
+                    self._resolve_ping_start_emoji(),
+                    parse_mode="html",
+                    file=start_banner_url,
+                    invert_media=invert_media,
+                )
+            else:
+                msg = await event.edit(
+                    self._resolve_ping_start_emoji(),
+                    parse_mode="html",
+                )
+            ping_time = round((time.time() - start_time) * 1000, 2)
+
+            uptime_seconds = int(time.time() - self.kernel.start_time)
+            hours = uptime_seconds // 3600
+            minutes = (uptime_seconds % 3600) // 60
+            seconds = uptime_seconds % 60
+
+            if hours > 0:
+                uptime = f"{hours}{self.strings('hours')} {minutes}{self.strings('minutes')} {seconds}{self.strings('seconds')}"
+            elif minutes > 0:
+                uptime = f"{minutes}{self.strings('minutes')} {seconds}{self.strings('seconds')}"
+            else:
+                uptime = f"{seconds}{self.strings('seconds')}"
+
+            custom_text = self.config.get("custom_text") or ""
+            if custom_text:
+                response = await self._build_custom_text(
+                    custom_text,
+                    ping_time,
+                    uptime,
+                )
+            else:
+                start_emoji = self._resolve_ping_start_emoji()
+                response = f"""<blockquote>{start_emoji} <b>{self.strings("ping")}:</b> {ping_time} {self.strings("ms")}</blockquote>
+<blockquote>{start_emoji} <b>{self.strings("uptime")}:</b> {uptime}</blockquote>"""
+
+            if (
+                banner_url
+                and quote_media
+                and banner_url.startswith(("http://", "https://"))
+            ):
+                try:
+                    await msg.edit(
+                        response,
+                        file=InputMediaWebPage(banner_url, optional=True),
+                        parse_mode="html",
+                        invert_media=invert_media,
+                    )
+                    return
+                except Exception as e:
+                    self.log.error(f"Ping banner error: {e}")
+
+            if banner_url:
+                try:
+                    await msg.edit(
+                        response,
+                        file=banner_url,
+                        parse_mode="html",
+                        invert_media=invert_media,
+                    )
+                except Exception:
+                    try:
+                        text, entities = await self.kernel.client._parse_message_text(
+                            response, "html"
+                        )
+                        text, entities = self._add_link_preview(
+                            text, entities, banner_url
+                        )
+                        await msg.edit(
+                            text,
+                            formatting_entities=entities,
+                            parse_mode=None,
+                        )
+                    except Exception:
+                        await msg.edit(response, parse_mode="html")
+            else:
+                await msg.edit(response, parse_mode="html")
+
+        except Exception as e:
+            await event.edit(
+                self.strings("error_logs", snowflake=CUSTOM_EMOJI["❄️"]),
+                parse_mode="html",
+            )
+            self.log.error(f"Ping error: {e}")
+            await self.kernel.handle_error(e, message='Failed command "ping"')
+
+    async def _build_custom_text(
+        self,
+        custom_text: str,
+        ping_time: float,
+        uptime: str,
+    ) -> str:
+        now = datetime.now()
+
+        month_names_ru = [
+            "Янвapя",
+            "Фeвpaля",
+            "Mapтa",
+            "Aпpeля",
+            "Maя",
+            "Июня",
+            "Июля",
+            "Aвгycтa",
+            "Ceнтябpя",
+            "Oктябpя",
+            "Hoябpя",
+            "Дeкaбpя",
+        ]
+        month_names_en = [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ]
+        weekday_names_ru = [
+            "Пoнeдeльник",
+            "Втopник",
+            "Cpeдa",
+            "Чeтвepг",
+            "Пятницa",
+            "Cyббoтa",
+            "Вocкpeceньe",
+        ]
+        weekday_names_en = [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        ]
+
+        use_ru = self.get_lang() == "ru"
+        now_date = now.strftime("%d.%m.%Y")
+        now_time = now.strftime("%H:%M:%S")
+        now_day = now.strftime("%d")
+        now_month = now.strftime("%m")
+        now_month_name = (month_names_ru if use_ru else month_names_en)[now.month - 1]
+        now_year = now.strftime("%Y")
+        now_weekday = (weekday_names_ru if use_ru else weekday_names_en)[now.weekday()]
+        now_hour = now.strftime("%H")
+        now_minute = now.strftime("%M")
+        now_second = now.strftime("%S")
+
+        identity = self.cache.get("tester:identity")
+        if identity is None:
+            try:
+                system_user = getpass.getuser()
+                hostname = socket.gethostname()
+            except Exception:
+                system_user = hostname = "Unknown"
+            identity = (system_user, hostname)
+            self.cache.set("tester:identity", identity)
+        else:
+            system_user, hostname = identity
+
+        cpu_usage, ram_usage = self._get_cpu_ram()
+
+        version_info = self.cache.get("tester:version_info")
+        if version_info:
+            branch, commit_sha = version_info[0], version_info[1]
+        else:
+            branch = await self.kernel.version_manager.detect_branch()
+            commit_sha = await self.kernel.version_manager.get_commit_sha()
+            self.cache.set("tester:version_info", (branch, commit_sha), ttl=600)
+
+        try:
+            return await utils.resolve_placeholders(
+                self.name,
+                custom_text,
+                data={
+                    "ping_time": ping_time,
+                    "uptime": uptime,
+                    "system_user": system_user,
+                    "hostname": hostname,
+                    "cpu_usage": cpu_usage,
+                    "ram_usage": ram_usage,
+                    "branch": branch,
+                    "commit_sha": commit_sha,
+                    "now_date": now_date,
+                    "now_time": now_time,
+                    "now_day": now_day,
+                    "now_month": now_month,
+                    "now_month_name": now_month_name,
+                    "now_year": now_year,
+                    "now_weekday": now_weekday,
+                    "now_hour": now_hour,
+                    "now_minute": now_minute,
+                    "now_second": now_second,
+                },
+                strict=False,
+            )
+        except Exception as e:
+            return self.strings("custom_text_error", error=str(e))
+
+    def _add_link_preview(self, text: str, entities: list, link: str) -> tuple:
+        from copy import copy
+
+        if not text or not link:
+            return text, entities
+
+        zero_width = "\u2060"
+        new_text = zero_width + text
+        new_entities = []
+
+        if entities:
+            for entity in entities:
+                new_entity = copy(entity)
+                if hasattr(entity, "offset"):
+                    new_entity.offset += 1
+                new_entities.append(new_entity)
+
+        from telethon.tl.types import MessageEntityTextUrl
+
+        link_entity = MessageEntityTextUrl(offset=0, length=1, url=link)
+        new_entities.append(link_entity)
+        return new_text, new_entities
+
+    @command("logs", doc_ru="пoкaзaть/oчиcтить лoги", doc_en="show/clear kernel logs")
+    async def cmd_logs(self, event: Any) -> None:
+        kernel_log_path = os.path.join(self.kernel.LOGS_DIR, "kernel.log")
+
+        if not os.path.exists(kernel_log_path):
+            await event.edit(
+                self.strings("logs_not_found", file=CUSTOM_EMOJI["📁"]),
+                parse_mode="html",
+            )
+            return
+
+        size_kernel_log = os.path.getsize(kernel_log_path)
+        if size_kernel_log == 0:
+            await event.edit(
+                f"{CUSTOM_EMOJI['🗳']} {self.strings('file_empty')}",
+                parse_mode="html",
+            )
+            return
+
+        args = self.args(event)
+        if len(args) > 0:
+            arg0 = args.get(0)
+            normalized_arg = self._normalize_log_level(arg0)
+            if arg0 == "clear":
+                with open(kernel_log_path, "w"):
+                    pass
+                await event.edit(
+                    f"{CUSTOM_EMOJI['🗳']} {self.strings('logs_clear')}",
+                    parse_mode="html",
+                )
+                return
+
+            tail = None
+            args0 = args.get(0)
+            if args0 == "tail":
+                if not args.get(1):
+                    tail = 20
+                else:
+                    try:
+                        tail = int(args.get(1))
+                    except ValueError:
+                        tail = 20
+
+                with open(kernel_log_path) as f:
+                    lines = f.readlines()
+
+                last_lines = lines[-tail:] if tail <= len(lines) else lines
+
+                output = "".join(last_lines)
+                if getattr(event, "piped", False):
+                    event.pipe_output = str(output)
+                    return
+                await event.edit(f"<pre>{output}</pre>", parse_mode="html")
+                return
+
+            if not normalized_arg:
+                await event.edit(
+                    f"{CUSTOM_EMOJI['🧊']} {self.strings('logs_not_fount_args')}",
+                    parse_mode="html",
+                )
+                return
+
+            await event.edit(
+                self.strings("logs_sending", printer=CUSTOM_EMOJI["🖨"]),
+                parse_mode="html",
+            )
+            await self._send_logs(event, normalized_arg)
+            return
+
+        await self.inline(
+            event.chat_id,
+            f"{self.strings('logs_choose_level', paper=CUSTOM_EMOJI['📰'])}"
+            + "\n"
+            + f"{self.strings('logs_choose_desc')}",
+            reply_to=getattr(event.message, "reply_to", None),
+            buttons=[
+                [
+                    self.Button.inline(
+                        "DEBUG", self.cb_logs, data="level:debug", style="primary"
+                    ),
+                    self.Button.inline(
+                        "INFO", self.cb_logs, data="level:info", style="primary"
+                    ),
+                ],
+                [
+                    self.Button.inline(
+                        "WARNING", self.cb_logs, data="level:warning", style="primary"
+                    ),
+                    self.Button.inline(
+                        "ERROR", self.cb_logs, data="level:error", style="primary"
+                    ),
+                ],
+                [
+                    self.Button.inline(
+                        "CRITICAL", self.cb_logs, data="level:critical", style="primary"
+                    ),
+                    self.Button.inline(
+                        "ALL", self.cb_logs, data="level:all", style="primary"
+                    ),
+                ],
+                [
+                    self.Button.inline(
+                        "✖", self.cb_logs, data="tester_logs:cancel", style="danger"
+                    )
+                ],
+            ],
+        )
+
+    @callback()
+    async def cb_logs(self, call: Any, data: str | None = None) -> None:
+        data_str = str(data) if data else ""
+
+        if data_str == "cancel" or data_str == "tester_logs:cancel":
+            await call.edit(
+                self.strings("logs_send_cancelled", snowflake=CUSTOM_EMOJI["❄️"]),
+                parse_mode="html",
+            )
+            return
+
+        if data_str.startswith("confirm:"):
+            level = data_str.rsplit(":", 1)[-1]
+            if not level:
+                await call.answer("Unknown level", alert=True)
+                return
+            await self._send_logs(call, level)
+            return
+
+        if data_str.startswith("back:") or data_str == "tester_logs:back":
+            await call.edit(
+                f"{self.strings('logs_choose_level', paper=CUSTOM_EMOJI['📰'])}"
+                + "\n"
+                + f"{self.strings('logs_choose_desc')}",
+                parse_mode="html",
+                buttons=[
+                    [
+                        self.Button.inline(
+                            "DEBUG", self.cb_logs, data="level:debug", style="primary"
+                        ),
+                        self.Button.inline(
+                            "INFO", self.cb_logs, data="level:info", style="primary"
+                        ),
+                    ],
+                    [
+                        self.Button.inline(
+                            "WARNING",
+                            self.cb_logs,
+                            data="level:warning",
+                            style="primary",
+                        ),
+                        self.Button.inline(
+                            "ERROR", self.cb_logs, data="level:error", style="primary"
+                        ),
+                    ],
+                    [
+                        self.Button.inline(
+                            "CRITICAL",
+                            self.cb_logs,
+                            data="level:critical",
+                            style="primary",
+                        ),
+                        self.Button.inline(
+                            "ALL", self.cb_logs, data="level:all", style="primary"
+                        ),
+                    ],
+                    [
+                        self.Button.inline(
+                            "✖", self.cb_logs, data="cancel", style="danger"
+                        )
+                    ],
+                ],
+            )
+            return
+
+        if not data_str.startswith("level:"):
+            return
+
+        level = data_str.rsplit(":", 1)[-1]
+        if not level:
+            await call.answer("Unknown level", alert=True)
+            return
+
+        if level in {"debug", "all"}:
+            await call.edit(
+                self.strings(
+                    "logs_level_warning",
+                    snowflake=CUSTOM_EMOJI["❄️"],
+                    level=level.upper(),
+                ),
+                parse_mode="html",
+                buttons=[
+                    [
+                        self.Button.inline(
+                            "✅ Send" if self.get_lang() == "en" else "✅ Oтпpaвить",
+                            self.cb_logs,
+                            data=f"confirm:{level}",
+                            style="success",
+                        ),
+                        self.Button.inline(
+                            "↩", self.cb_logs, data="tester_logs:back", style="primary"
+                        ),
+                    ],
+                    [
+                        self.Button.inline(
+                            "✖", self.cb_logs, data="cancel", style="danger"
+                        )
+                    ],
+                ],
+            )
+            return
+
+        await self._send_logs(call, level)
+
+    @command("freezing", doc_ru="зaмopoзить юзepбoт", doc_en="freeze userbot")
+    async def cmd_freezing(self, event: Any) -> None:
+        args_raw = self.args_raw(event).strip()
+        if not args_raw:
+            await event.edit(
+                self.strings(
+                    "freezing_usage",
+                    speech=CUSTOM_EMOJI["🗯"],
+                    prefix=self.get_prefix(),
+                ),
+                parse_mode="html",
+            )
+            return
+
+        try:
+            seconds = int(args_raw)
+            if seconds <= 0 or seconds > 60:
+                await event.edit(
+                    self.strings("freezing_range", speech=CUSTOM_EMOJI["🗯"]),
+                    parse_mode="html",
+                )
+                return
+        except ValueError:
+            await event.edit(
+                self.strings("freezing_number", speech=CUSTOM_EMOJI["🗯"]),
+                parse_mode="html",
+            )
+            return
+
+        await event.edit(
+            self.strings(
+                "freezing_start", snowflake=CUSTOM_EMOJI["🧊"], seconds=seconds
+            ),
+            parse_mode="html",
+        )
+
+        client = self.kernel.client
+        was_connected = client.is_connected()
+        if was_connected:
+            client.disconnect()
+            await asyncio.sleep(0.5)
+
+        await asyncio.sleep(seconds)
+
+        if was_connected:
+            await client.connect()
+        await event.edit(
+            self.strings("freezing_done", check=CUSTOM_EMOJI["☑️"], seconds=seconds),
+            parse_mode="html",
+        )
+
+    @command(
+        "teaser",
+        doc_ru="тecтиpoвaть кoмaндy c лoгиpoвaниeм",
+        doc_en="test a command with logging",
+    )
+    async def cmd_teaser(self, event) -> None:
+        """(cmd) - execute cmd with full logging"""
+        args = self.args(event)
+        if not args:
+            await event.edit(
+                self.strings("teaser_no_cmd", prefix=self.get_prefix()),
+                parse_mode="html",
+            )
+            return
+
+        cmd_name = args.get(0)
+        prefix = self.get_prefix()
+        cmd_args_raw = event.text[len(prefix) + len("teaser ") :]
+        full_cmd = cmd_args_raw
+
+        # Build fake text as if the command was called directly
+        # e.g. ".teaser reload terminal" -> fake ".reload terminal"
+        fake_text = prefix + cmd_args_raw
+
+        handler = self.kernel.command_handlers.get(cmd_name)
+        if not handler:
+            await event.edit(
+                self.strings("teaser_cmd_not_found", cmd=cmd_name), parse_mode="html"
+            )
+            return
+
+        kernel_log_path = os.path.join(self.kernel.LOGS_DIR, "kernel.log")
+        initial_size = 0
+        if os.path.exists(kernel_log_path):
+            initial_size = os.path.getsize(kernel_log_path)
+
+        await event.edit(
+            self.strings("teaser_recording", cmd=full_cmd), parse_mode="html"
+        )
+
+        fake = _FakeEventProxy(event, fake_text=fake_text)
+        self.log.info(f"Teaser: executing {full_cmd} with FakeEvent")
+
+        try:
+            if asyncio.iscoroutinefunction(handler):
+                await handler(fake)
+            else:
+                handler(fake)
+        except Exception as e:
+            self.log.error(f"Teaser: command {full_cmd} error: {e}")
+
+        # Build report
+        report_parts = [self.strings("teaser_report_header", cmd=full_cmd)]
+
+        event_log = fake.get_log()
+        if event_log:
+            report_parts.append(
+                self.strings("teaser_event_log", log="\n".join(event_log))
+            )
+        else:
+            report_parts.append("<b>No event calls recorded</b>\n")
+
+        new_log_entries = ""
+        if os.path.exists(kernel_log_path):
+            with open(kernel_log_path, encoding="utf-8", errors="ignore") as f:
+                f.seek(initial_size)
+                new_log_entries = f.read().strip()
+
+        if new_log_entries:
+            report_parts.append(self.strings("teaser_kernel_log", log=new_log_entries))
+        else:
+            report_parts.append(self.strings("teaser_empty_log"))
+
+        report = "\n".join(report_parts)
+
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        )
+        try:
+            tmp.write("<html><body><pre>" + report + "</pre></body></html>")
+            tmp.close()
+            try:
+                await event.edit(
+                    self.strings("teaser_done", cmd=full_cmd),
+                    file=tmp.name,
+                    parse_mode="html",
+                )
+            except Exception:
+                await event.respond(
+                    self.strings("teaser_done", cmd=full_cmd),
+                    file=tmp.name,
+                    parse_mode="html",
+                )
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass

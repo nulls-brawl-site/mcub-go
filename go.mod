@@ -4,7 +4,7 @@ go 1.19
 
 require (
 	github.com/mattn/go-sqlite3 v1.14.22
-	github.com/nulls-brawl-site/telegram-mcub-go v0.0.0
+	github.com/nulls-brawl-site/telegram-mcub-go v0.1.0
 )
 
 require (
@@ -30,4 +30,4 @@ require (
 	rsc.io/qr v0.2.0 // indirect
 )
 
-replace github.com/nulls-brawl-site/telegram-mcub-go => /tmp/opencode/telegram-mcub-go
+// replace github.com/nulls-brawl-site/telegram-mcub-go => /tmp/opencode/telegram-mcub-go

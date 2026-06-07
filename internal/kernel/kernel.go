@@ -177,3 +177,40 @@ func (k *Kernel) Middlewares() []Middleware {
 func (k *Kernel) Uptime() time.Duration {
 	return time.Since(k.StartTime)
 }
+
+// GetClient returns the MCUBClient (used by pybridge via duck-typed interface).
+func (k *Kernel) GetClient() *mcubclient.MCUBClient {
+	return k.Client
+}
+
+// getClient implements kernelIface (unexported, called by pybridge).
+func (k *Kernel) getClient() *mcubclient.MCUBClient {
+	return k.Client
+}
+
+// getPrefix implements kernelIface.
+func (k *Kernel) getPrefix() string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return k.CustomPrefix
+}
+
+// getVersion implements kernelIface.
+func (k *Kernel) getVersion() string {
+	return k.Version
+}
+
+// getStartTimestamp implements kernelIface.
+func (k *Kernel) getStartTimestamp() int64 {
+	return k.StartTime.Unix()
+}
+
+// registerCommand implements kernelIface (lowercase, delegates to exported form).
+func (k *Kernel) registerCommand(name, moduleName, description string, h loader.CommandHandler) {
+	k.RegisterCommand(name, moduleName, description, h)
+}
+
+// unregisterCommand implements kernelIface (lowercase, delegates to exported form).
+func (k *Kernel) unregisterCommand(name string) {
+	k.UnregisterCommand(name)
+}
