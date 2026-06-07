@@ -424,63 +424,194 @@ var moduleScannerPy string
 const pythonBootstrap = `
 import sys
 import asyncio
+import json
 
 def _mcub_load_module(file_path, mod_name):
-    """Load a user .py module and return module-scan JSON string."""
+    """Load a .py module, instantiate it, register commands, return JSON info."""
     import importlib.util
-    import json
 
+    mcub_compat = sys.modules.get("mcub_compat")
+    if mcub_compat is None:
+        raise RuntimeError("mcub_compat not loaded")
+
+    ModuleBase   = mcub_compat.ModuleBase
+    KernelProxy  = mcub_compat.KernelProxy
+    ClientProxy  = mcub_compat.ClientProxy
+    _RegisterProxy = mcub_compat._RegisterProxy
+    _module_instances = mcub_compat._module_instances
+    _command_handlers = mcub_compat._command_handlers
+
+    # Execute the .py file into a fresh namespace
     spec = importlib.util.spec_from_file_location(mod_name, file_path)
     if spec is None:
         raise ImportError(f"Cannot create spec for {file_path!r}")
-
     mod = importlib.util.module_from_spec(spec)
     mod.__name__ = mod_name
     sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
 
-    scanner = sys.modules.get("module_scanner")
-    if scanner is None:
-        raise RuntimeError("module_scanner not loaded")
+    # --- Detect module style ---
 
-    info = scanner.scan_module(mod)
-    return json.dumps(info, ensure_ascii=False)
+    # Style 1: class-based (ModuleBase subclass)
+    found_class = None
+    for attr_name in dir(mod):
+        try:
+            attr = getattr(mod, attr_name)
+        except Exception:
+            continue
+        if (isinstance(attr, type) and issubclass(attr, ModuleBase)
+                and attr is not ModuleBase):
+            found_class = attr
+            break
+
+    if found_class is not None:
+        display_name = getattr(found_class, "name", mod_name)
+        kp = KernelProxy(session_id=0, module_name=display_name)
+        cp = ClientProxy(session_id=0)
+        reg = _RegisterProxy(display_name)
+        # Instantiate: this populates _command_handlers via __init__
+        instance = found_class(kp, cp, reg)
+        _module_instances[display_name] = instance
+        _module_instances[mod_name] = instance  # also store by file name
+        # Run on_load synchronously
+        try:
+            asyncio.run(instance.on_load())
+        except RuntimeError:
+            # Already running event loop (shouldn't happen in bridge context)
+            pass
+        except Exception as e:
+            import traceback
+            print(f"[mcub_compat] on_load error for {display_name}: {e}")
+            traceback.print_exc()
+        cmds = []
+        for (pattern, func, meta) in type(instance)._cmd_registry:
+            cmds.append({
+                "name": pattern,
+                "doc_en": meta.get("doc_en", ""),
+                "doc_ru": meta.get("doc_ru", ""),
+                "method": func.__name__,
+                "class": type(instance).__name__,
+                "style": "class",
+            })
+        return json.dumps({
+            "name": display_name,
+            "version": getattr(found_class, "version", "1.0.0"),
+            "author": getattr(found_class, "author", "unknown"),
+            "description": getattr(found_class, "description", {}),
+            "commands": cmds,
+            "style": "class",
+        }, ensure_ascii=False)
+
+    # Style 2: function-based (def register(kernel))
+    register_fn = getattr(mod, "register", None)
+    if callable(register_fn) and not isinstance(register_fn, type):
+        # Guess module name from module-level attrs
+        display_name = getattr(mod, "name", mod_name)
+        kp = KernelProxy(session_id=0, module_name=display_name)
+        reg = kp.register  # _RegisterProxy with module_name
+        kp.register = reg
+        try:
+            result = register_fn(kp)
+            if asyncio.iscoroutine(result):
+                asyncio.run(result)
+        except Exception as e:
+            import traceback
+            print(f"[mcub_compat] register() error for {display_name}: {e}")
+            traceback.print_exc()
+        _module_instances[display_name] = kp
+        _module_instances[mod_name] = kp
+        cmds = [{"name": n, "doc_en": de, "doc_ru": dr, "method": n, "class": "", "style": "function"}
+                for (n, de, dr) in reg.registered_commands]
+        return json.dumps({
+            "name": display_name,
+            "version": getattr(mod, "version", "1.0.0"),
+            "author": getattr(mod, "author", "unknown"),
+            "description": {},
+            "commands": cmds,
+            "style": "function",
+        }, ensure_ascii=False)
+
+    # Style 3: loader-style (module-level @command decorated functions via loader.command)
+    import core.lib.loader.module_base as loader_mod
+    display_name = getattr(mod, "name", mod_name)
+    kp = KernelProxy(session_id=0, module_name=display_name)
+    reg = _RegisterProxy(display_name)
+    cmds_found = []
+    for attr_name in dir(mod):
+        try:
+            attr = getattr(mod, attr_name)
+        except Exception:
+            continue
+        if callable(attr) and hasattr(attr, "_mcub_commands"):
+            for (pattern, meta) in attr._mcub_commands:
+                import functools
+                _fn = attr
+                async def _handler(event, f=_fn):
+                    return await f(event)
+                _command_handlers[(display_name, pattern)] = _handler
+                cmds_found.append({"name": pattern, "doc_en": meta.get("doc_en",""),
+                                    "doc_ru": meta.get("doc_ru",""), "method": attr_name,
+                                    "class": "", "style": "loader"})
+        elif callable(attr) and getattr(attr, "_mcub_command", False):
+            pattern = attr._mcub_cmd_name
+            import functools
+            _fn = attr
+            async def _handler(event, f=_fn):
+                return await f(event)
+            _command_handlers[(display_name, pattern)] = _handler
+            cmds_found.append({"name": pattern, "doc_en": getattr(attr,"_mcub_doc_en",""),
+                                "doc_ru": getattr(attr,"_mcub_doc_ru",""), "method": attr_name,
+                                "class": "", "style": "loader"})
+    _module_instances[display_name] = mod
+    _module_instances[mod_name] = mod
+    return json.dumps({
+        "name": display_name,
+        "version": getattr(mod, "version", "1.0.0"),
+        "author": getattr(mod, "author", "unknown"),
+        "description": {},
+        "commands": cmds_found,
+        "style": "loader",
+    }, ensure_ascii=False)
 
 
-def _mcub_call_command(mod_name, class_name, method_name,
+def _mcub_call_command(mod_name, cmd_name,
                        session_id, chat_id, msg_id, text, sender_id):
-    """Invoke a command handler from Go with a synthetic Event."""
+    """Invoke a stored command handler with a synthetic Event."""
     mcub_compat = sys.modules.get("mcub_compat")
     if mcub_compat is None:
         raise RuntimeError("mcub_compat not loaded")
 
-    Event       = mcub_compat.Event
-    KernelProxy = mcub_compat.KernelProxy
+    Event = mcub_compat.Event
+    _command_handlers = mcub_compat._command_handlers
+    _module_instances  = mcub_compat._module_instances
 
-    mod = sys.modules.get(mod_name)
-    if mod is None:
-        raise ValueError(f"Module {mod_name!r} not in sys.modules")
-
-    event = Event(session_id, chat_id, msg_id, text, sender_id)
-
-    if class_name:
-        cls = getattr(mod, class_name, None)
-        if cls is None:
-            raise AttributeError(
-                f"Class {class_name!r} not found in module {mod_name!r}")
-        instance = cls()
-        kp = KernelProxy(session_id)
-        if hasattr(instance, "set_kernel"):
-            instance.set_kernel(kp)
-        if hasattr(instance, "set_session"):
-            instance.set_session(session_id)
-        handler = getattr(instance, method_name, None)
-    else:
-        handler = getattr(mod, method_name, None)
+    # Look up the handler stored during module load
+    handler = _command_handlers.get((mod_name, cmd_name))
+    if handler is None:
+        # Try alternate key (file-based mod_name vs display_name)
+        for (mn, cn), h in _command_handlers.items():
+            if cn == cmd_name and (mn == mod_name or mn.replace("-","_") == mod_name.replace("-","_")):
+                handler = h
+                break
 
     if handler is None:
-        raise AttributeError(
-            f"Handler {method_name!r} not found in {mod_name!r}/{class_name!r}")
+        raise KeyError(f"No handler for ({mod_name!r}, {cmd_name!r}). "
+                       f"Known: {list(_command_handlers.keys())}")
+
+    # If the stored instance needs session wired in, update KernelProxy
+    instance = _module_instances.get(mod_name)
+    if instance is not None and hasattr(instance, "_session_id"):
+        instance._session_id = session_id
+        if hasattr(instance, "client") and hasattr(instance.client, "_session_id"):
+            instance.client._session_id = session_id
+        if hasattr(instance, "_kernel_obj") and instance._kernel_obj is not None:
+            kp = instance._kernel_obj
+            if hasattr(kp, "_session_id"):
+                kp._session_id = session_id
+            if hasattr(kp, "client") and hasattr(kp.client, "_session_id"):
+                kp.client._session_id = session_id
+
+    event = Event(session_id, chat_id, msg_id, text, sender_id)
 
     if asyncio.iscoroutinefunction(handler):
         asyncio.run(handler(event))
@@ -706,8 +837,7 @@ func (b *Bridge) CallPyCommand(modName, cmdName string, ev BridgeEvent) error {
 	if !ok {
 		return fmt.Errorf("pybridge: module %q not loaded", modName)
 	}
-	cmd, ok := cmdMap[cmdName]
-	if !ok {
+	if _, ok := cmdMap[cmdName]; !ok {
 		return fmt.Errorf("pybridge: command %q not found in module %q", cmdName, modName)
 	}
 
@@ -728,16 +858,13 @@ func (b *Bridge) CallPyCommand(modName, cmdName string, ev BridgeEvent) error {
 	}
 	defer C.Py_DecRef(callFn)
 
-	// Build args: (mod_name, class_name, method_name, session_id,
-	//              chat_id, msg_id, text, sender_id)
+	// Build args: (mod_name, cmd_name, session_id, chat_id, msg_id, text, sender_id)
 	cModName := C.CString(modName)
-	cClassName := C.CString(cmd.ClassName)
-	cMethodName := C.CString(cmd.MethodName)
+	cCmdName := C.CString(cmdName)
 	cText := C.CString(ev.Text)
 
 	pyModName := C.PyUnicode_FromString(cModName)
-	pyClassName := C.PyUnicode_FromString(cClassName)
-	pyMethodName := C.PyUnicode_FromString(cMethodName)
+	pyCmdName := C.PyUnicode_FromString(cCmdName)
 	pySessID := C.PyLong_FromLongLong(C.longlong(sessionID))
 	pyChatID := C.PyLong_FromLongLong(C.longlong(ev.ChatID))
 	pyMsgID := C.PyLong_FromLongLong(C.longlong(ev.MessageID))
@@ -745,16 +872,14 @@ func (b *Bridge) CallPyCommand(modName, cmdName string, ev BridgeEvent) error {
 	pySenderID := C.PyLong_FromLongLong(C.longlong(ev.SenderID))
 
 	C.free(unsafe.Pointer(cModName))
-	C.free(unsafe.Pointer(cClassName))
-	C.free(unsafe.Pointer(cMethodName))
+	C.free(unsafe.Pointer(cCmdName))
 	C.free(unsafe.Pointer(cText))
 
-	if pyModName == nil || pyClassName == nil || pyMethodName == nil ||
+	if pyModName == nil || pyCmdName == nil ||
 		pySessID == nil || pyChatID == nil || pyMsgID == nil ||
 		pyText == nil || pySenderID == nil {
 		C.Py_XDECREF(pyModName)
-		C.Py_XDECREF(pyClassName)
-		C.Py_XDECREF(pyMethodName)
+		C.Py_XDECREF(pyCmdName)
 		C.Py_XDECREF(pySessID)
 		C.Py_XDECREF(pyChatID)
 		C.Py_XDECREF(pyMsgID)
@@ -763,11 +888,10 @@ func (b *Bridge) CallPyCommand(modName, cmdName string, ev BridgeEvent) error {
 		return errors.New("pybridge: out of memory building call args")
 	}
 
-	args := C.PyTuple_New(8)
+	args := C.PyTuple_New(7)
 	if args == nil {
 		C.Py_DecRef(pyModName)
-		C.Py_DecRef(pyClassName)
-		C.Py_DecRef(pyMethodName)
+		C.Py_DecRef(pyCmdName)
 		C.Py_DecRef(pySessID)
 		C.Py_DecRef(pyChatID)
 		C.Py_DecRef(pyMsgID)
@@ -776,13 +900,12 @@ func (b *Bridge) CallPyCommand(modName, cmdName string, ev BridgeEvent) error {
 		return errors.New("pybridge: out of memory building tuple")
 	}
 	C.PyTuple_SetItem(args, 0, pyModName)
-	C.PyTuple_SetItem(args, 1, pyClassName)
-	C.PyTuple_SetItem(args, 2, pyMethodName)
-	C.PyTuple_SetItem(args, 3, pySessID)
-	C.PyTuple_SetItem(args, 4, pyChatID)
-	C.PyTuple_SetItem(args, 5, pyMsgID)
-	C.PyTuple_SetItem(args, 6, pyText)
-	C.PyTuple_SetItem(args, 7, pySenderID)
+	C.PyTuple_SetItem(args, 1, pyCmdName)
+	C.PyTuple_SetItem(args, 2, pySessID)
+	C.PyTuple_SetItem(args, 3, pyChatID)
+	C.PyTuple_SetItem(args, 4, pyMsgID)
+	C.PyTuple_SetItem(args, 5, pyText)
+	C.PyTuple_SetItem(args, 6, pySenderID)
 
 	result := C.PyObject_Call(callFn, args, nil)
 	C.Py_DecRef(args)

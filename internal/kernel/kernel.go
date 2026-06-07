@@ -81,6 +81,10 @@ type Kernel struct {
 	ModulesDir       string
 	ModulesLoadedDir string
 
+	// --- Python bridge (set during Init, stored as interface{} so kernel.go
+	//     does not need to import pybridge directly) ---
+	PyBridge interface{}
+
 	// --- Runtime flags ---
 	ShutdownFlag bool
 
@@ -213,4 +217,39 @@ func (k *Kernel) registerCommand(name, moduleName, description string, h loader.
 // unregisterCommand implements kernelIface (lowercase, delegates to exported form).
 func (k *Kernel) unregisterCommand(name string) {
 	k.UnregisterCommand(name)
+}
+
+// --- Module-map helpers (used by loader.SystemLoader / loader.UserLoader) ---
+
+// StoreSystemModule stores a loaded system module in the SystemModules map.
+// Satisfies loader.systemKernelStore.
+func (k *Kernel) StoreSystemModule(name string, m loader.Module) {
+	k.mu.Lock()
+	k.SystemModules[name] = m
+	k.mu.Unlock()
+}
+
+// StoreUserModule stores a loaded user module in the LoadedModules map.
+// Satisfies loader.userKernelStore.
+func (k *Kernel) StoreUserModule(name string, m loader.Module) {
+	k.mu.Lock()
+	k.LoadedModules[name] = m
+	k.mu.Unlock()
+}
+
+// --- kernelDepsIface helpers (used by loader.LoadUserModules package func) ---
+
+// GetLoader returns the kernel's module Loader.
+func (k *Kernel) GetLoader() *loader.Loader {
+	return k.Loader
+}
+
+// GetLogIface returns the kernel's logger as a loader.LogIface.
+func (k *Kernel) GetLogIface() loader.LogIface {
+	return k.Log
+}
+
+// GetBridge returns the Python bridge stored during Init.
+func (k *Kernel) GetBridge() interface{} {
+	return k.PyBridge
 }

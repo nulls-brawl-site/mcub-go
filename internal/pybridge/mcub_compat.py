@@ -80,22 +80,87 @@ class _MagicStubModule(types.ModuleType):
 
 
 # ============================================================
+# Helper: create bound coroutine wrapper
+# ============================================================
+def _make_bound(func, instance):
+    """Return a coroutine function bound to instance."""
+    import asyncio
+    import functools
+    @functools.wraps(func)
+    async def _bound(event):
+        return await func(instance, event)
+    if not asyncio.iscoroutinefunction(func):
+        @functools.wraps(func)
+        async def _bound_sync(event):
+            return func(instance, event)
+        return _bound_sync
+    return _bound
+
+# ============================================================
 # ModuleBase class - all MCUB modules inherit from this
 # ============================================================
+# Global registry: (module_name, cmd_name) -> bound async callable
+_command_handlers = {}
+# Global registry: module_name -> instance
+_module_instances = {}
+
 class ModuleBase:
     name = "unnamed"
     version = "1.0.0"
     author = "unknown"
     description = {}  # {"en": "...", "ru": "..."}
 
-    def __init__(self):
-        self._kernel = None
+    # Per-subclass command registries, populated by __init_subclass__
+    _cmd_registry: list = []
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls._cmd_registry = []
+        for attr_name in list(cls.__dict__):
+            attr = cls.__dict__[attr_name]
+            if callable(attr) and hasattr(attr, '_mcub_commands'):
+                for (pattern, meta) in attr._mcub_commands:
+                    cls._cmd_registry.append((pattern, attr, meta))
+            elif callable(attr) and hasattr(attr, '_mcub_command') and attr._mcub_command:
+                cls._cmd_registry.append((attr._mcub_cmd_name, attr, {
+                    'doc_en': getattr(attr, '_mcub_doc_en', ''),
+                    'doc_ru': getattr(attr, '_mcub_doc_ru', ''),
+                }))
+
+    def __init__(self, kernel=None, client=None, register=None):
+        # Support both new-style (kernel, client, register) and legacy ()
+        self._kernel_obj = kernel
+        self._client_obj = client
+        self._register_obj = register
         self._session_id = None
         self.cache = _SimpleCache()
+        if kernel is not None:
+            self._kernel_obj = kernel
+        if client is not None:
+            self._client_obj = client
+
+        # Wire up self._strings stub (do NOT assign self.log - conflicts with @property)
+        self._strings = None
+
+        # Replace class-level strings dict/method with a _SimpleStrings instance
+        # that supports both self.strings("key") and self.strings["key"].
+        # Assigned to instance __dict__ directly to bypass any descriptor.
+        object.__setattr__(self, 'strings', _SimpleStrings())
+
+        # Register commands from _cmd_registry into global _command_handlers
+        mod_name = getattr(type(self), 'name', type(self).__name__)
+        for (pattern, func, meta) in type(self)._cmd_registry:
+            _bound = _make_bound(func, self)
+            _command_handlers[(mod_name, pattern)] = _bound
+            # Also register aliases
+            alias = meta.get('alias')
+            if alias:
+                for a in ([alias] if isinstance(alias, str) else alias):
+                    _command_handlers[(mod_name, a)] = _bound
 
     @property
     def kernel(self):
-        return self._kernel
+        return self._kernel_obj
 
     def set_kernel(self, kernel_proxy):
         self._kernel = kernel_proxy
@@ -124,10 +189,6 @@ class ModuleBase:
     def args(self, event):
         """Return command arguments as a list of tokens."""
         return self.args_raw(event).split()
-
-    def strings(self, key, **kwargs):
-        """Return a localised string.  Stub returns the key unchanged."""
-        return key
 
     def _get_strings(self):
         return lambda key, **kw: key
@@ -500,8 +561,31 @@ class ClientProxy:
 class _RegisterProxy:
     """Proxy for kernel.register used by function-based MCUB modules."""
 
-    def command(self, name, doc_en="", doc_ru="", **kwargs):
-        return command(name, doc_en=doc_en, doc_ru=doc_ru)
+    def __init__(self, module_name="unknown"):
+        self._module_name = module_name
+        self.registered_commands = []  # list of (name, doc_en, doc_ru)
+
+    def command(self, name, doc_en="", doc_ru="", alias=None, **kwargs):
+        mod_name = self._module_name
+        reg = self
+        def decorator(func):
+            import asyncio, functools
+            # Make async if needed
+            if asyncio.iscoroutinefunction(func):
+                handler = func
+            else:
+                @functools.wraps(func)
+                async def handler(event):
+                    return func(event)
+            _command_handlers[(mod_name, name)] = handler
+            reg.registered_commands.append((name, doc_en, doc_ru))
+            # Aliases
+            if alias:
+                for a in ([alias] if isinstance(alias, str) else alias):
+                    _command_handlers[(mod_name, a)] = handler
+                    reg.registered_commands.append((a, doc_en, doc_ru))
+            return func
+        return decorator
 
     def on_load(self, **kwargs):
         return lambda f: f
@@ -531,8 +615,9 @@ class _RegisterProxy:
 class KernelProxy:
     """Proxy object that Python modules receive as ``self.kernel``."""
 
-    def __init__(self, session_id):
+    def __init__(self, session_id=0, module_name="unknown"):
         self._session_id = session_id
+        self._module_name = module_name
         self.client = ClientProxy(session_id)
         self.custom_prefix = _mcub_go.get_prefix()
         self.config = {}
@@ -540,7 +625,7 @@ class KernelProxy:
         self.system_modules = {}
         self.VERSION = _mcub_go.get_version()
         self.start_time_ts = _mcub_go.get_start_time()
-        self.register = _RegisterProxy()
+        self.register = _RegisterProxy(module_name)
         self.logger = _Logger()
         self.bot_client = None
         self._live_module_configs = {}

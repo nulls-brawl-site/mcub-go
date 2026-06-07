@@ -4,24 +4,26 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/nulls-brawl-site/mcub-go/internal/database"
+	"github.com/nulls-brawl-site/mcub-go/internal/loader"
 	"github.com/nulls-brawl-site/mcub-go/internal/pybridge"
 	mcubclient "github.com/nulls-brawl-site/telegram-mcub-go/client"
 	"github.com/nulls-brawl-site/telegram-mcub-go/session"
 )
 
-// Init performs all pre-run initialisation:
-//   1. Opens the SQLite database.
-//   2. Creates the Telegram client.
-//   3. Registers event handlers.
+// Init performs all pre-run initialisation in the following order:
+//  1. Opens the SQLite database.
+//  2. Creates the Telegram client.
+//  3. Registers event handlers.
+//  4. Initialises the Python bridge with kernel callbacks.
+//  5. Loads system modules from ModulesDir via SystemLoader.
+//  6. Loads user modules from ModulesLoadedDir via UserLoader.
 func (k *Kernel) Init() error {
 	k.Log.Info("Initialising MCUB kernel (%s) v%s", k.Type, k.Version)
 
-	// Open database.
+	// 1. Open database.
 	dbPath := "mcub.db"
 	dbVer := 2
 	if k.Config != nil {
@@ -34,15 +36,7 @@ func (k *Kernel) Init() error {
 	k.DB = db
 	k.Log.Info("Database opened at %s (version %d)", dbPath, dbVer)
 
-	// Load Python modules (system and user directories).
-	if err := k.LoadPyModules(k.ModulesDir); err != nil {
-		k.Log.Warn("LoadPyModules(%s): %v", k.ModulesDir, err)
-	}
-	if err := k.LoadPyModules(k.ModulesLoadedDir); err != nil {
-		k.Log.Warn("LoadPyModules(%s): %v", k.ModulesLoadedDir, err)
-	}
-
-	// Create Telegram client.
+	// 2. Create Telegram client.
 	if k.Config == nil {
 		return fmt.Errorf("config not set")
 	}
@@ -65,9 +59,65 @@ func (k *Kernel) Init() error {
 	k.Client = cli
 	k.Log.Info("Telegram client created (APIID=%d)", k.Config.APIID)
 
-	// Register event handlers.
+	// 3. Register event handlers.
 	k.RegisterHandlers()
 	k.Log.Info("Event handlers registered")
+
+	// 4. Initialise Python bridge (shared between system and user loaders).
+	bridge, bridgeErr := pybridge.NewBridge()
+	if bridgeErr != nil {
+		k.Log.Warn("Python bridge unavailable – .py modules will not load: %v", bridgeErr)
+	} else {
+		pybridge.SetKernelCallbacks(pybridge.KernelCallbacks{
+			GetPrefix:    k.getPrefix,
+			GetVersion:   k.getVersion,
+			GetStartTime: k.getStartTimestamp,
+			LogInfo:      func(msg string) { k.Log.Info("[py] %s", msg) },
+			LogDebug:     func(msg string) { k.Log.Debug("[py] %s", msg) },
+			LogWarn:      func(msg string) { k.Log.Warn("[py] %s", msg) },
+			LogError:     func(msg string) { k.Log.Error("[py] %s", msg) },
+			DBGet: func(module, key string) string {
+				if k.DB == nil {
+					return ""
+				}
+				v, _, _ := k.DB.Get(module + ":" + key)
+				return v
+			},
+			DBSet: func(module, key, value string) {
+				if k.DB != nil {
+					_ = k.DB.Set(module+":"+key, value)
+				}
+			},
+			DBDelete: func(module, key string) {
+				if k.DB != nil {
+					_ = k.DB.Delete(module + ":" + key)
+				}
+			},
+			RestartKernel: func() {
+				go func() {
+					if err := k.Restart(); err != nil {
+						k.Log.Error("Restart triggered from Python failed: %v", err)
+					}
+				}()
+			},
+		})
+		k.PyBridge = bridge
+	}
+
+	// 5. Load system modules from modules/ directory.
+	sl := loader.NewSystemLoader(k, k.Loader, k.Log, k.PyBridge)
+	sysLoaded, sysFailed, _ := sl.LoadSystemModules(k.ModulesDir)
+	if len(sysFailed) > 0 {
+		k.Log.Warn("System module load failures: %v", sysFailed)
+	}
+	k.Log.Info("System modules: %d loaded, %d failed", sysLoaded, len(sysFailed))
+
+	// 6. Load user modules from modules_loaded/ directory.
+	userLoaded, userFailed, _ := loader.LoadUserModules(k, k.ModulesLoadedDir)
+	if len(userFailed) > 0 {
+		k.Log.Warn("User module load failures: %v", userFailed)
+	}
+	k.Log.Info("User modules: %d loaded, %d failed", userLoaded, len(userFailed))
 
 	return nil
 }
@@ -166,102 +216,4 @@ func (k *Kernel) healthcheckInterval() int {
 	return 30
 }
 
-// LoadPyModules scans dir for .py files and loads them through the Python bridge.
-// Missing directories are silently skipped.
-func (k *Kernel) LoadPyModules(dir string) error {
-	k.Log.Info("Loading Python modules from %s", dir)
 
-	bridge, err := pybridge.NewBridge()
-	if err != nil {
-		return fmt.Errorf("init Python bridge: %w", err)
-	}
-
-	// Wire kernel-wide callbacks so Python can call back into Go.
-	pybridge.SetKernelCallbacks(pybridge.KernelCallbacks{
-		GetPrefix:    k.getPrefix,
-		GetVersion:   k.getVersion,
-		GetStartTime: k.getStartTimestamp,
-		LogInfo:      func(msg string) { k.Log.Info("[py] %s", msg) },
-		LogDebug:     func(msg string) { k.Log.Debug("[py] %s", msg) },
-		LogWarn:      func(msg string) { k.Log.Warn("[py] %s", msg) },
-		LogError:     func(msg string) { k.Log.Error("[py] %s", msg) },
-		DBGet: func(module, key string) string {
-			if k.DB == nil {
-				return ""
-			}
-			v, _, _ := k.DB.Get(module + ":" + key)
-			return v
-		},
-		DBSet: func(module, key, value string) {
-			if k.DB != nil {
-				_ = k.DB.Set(module+":"+key, value)
-			}
-		},
-		DBDelete: func(module, key string) {
-			if k.DB != nil {
-				_ = k.DB.Delete(module + ":" + key)
-			}
-		},
-		RestartKernel: func() {
-			go func() {
-				if err := k.Restart(); err != nil {
-					k.Log.Error("Restart triggered from Python failed: %v", err)
-				}
-			}()
-		},
-	})
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			k.Log.Info("Python modules dir %s does not exist, skipping", dir)
-			return nil
-		}
-		return err
-	}
-
-	loaded := 0
-	failed := 0
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".py") {
-			continue
-		}
-		if name == "__init__.py" {
-			continue
-		}
-
-		path := filepath.Join(dir, name)
-		modName := strings.TrimSuffix(name, ".py")
-
-		k.Log.Debug("Loading Python module %s from %s", modName, path)
-
-		pyMod, err := bridge.LoadPyModule(path)
-		if err != nil {
-			k.Log.Error("Failed to load Python module %s: %v", modName, err)
-			failed++
-			continue
-		}
-
-		pm := pybridge.NewPythonModule(bridge, pyMod)
-		if err := k.Loader.LoadBuiltin(pm); err != nil {
-			k.Log.Error("Failed to register Python module %s: %v", modName, err)
-			failed++
-			continue
-		}
-
-		k.mu.Lock()
-		k.SystemModules[pm.Name()] = pm
-		k.mu.Unlock()
-
-		k.Log.Info("Loaded Python module %s (commands: %d)", pm.Name(), len(pm.Commands()))
-		loaded++
-	}
-
-	k.Log.Info("Python modules loaded: %d OK, %d failed", loaded, failed)
-	return nil
-}

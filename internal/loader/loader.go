@@ -4,16 +4,20 @@ import (
 	"fmt"
 	"plugin"
 	"sync"
+
+	"github.com/nulls-brawl-site/mcub-go/internal/pybridge"
 )
 
 // Loader manages the lifecycle of MCUB modules.
 // Built-in modules are registered directly; Go plugin (.so) modules are loaded
-// from the filesystem via the plugin package.
+// from the filesystem via the plugin package; Python modules are loaded via
+// the embedded Python bridge through PyLoader.
 type Loader struct {
 	mu       sync.Mutex
 	registry *Registry
 	kernel   interface{}
 	plugins  map[string]*plugin.Plugin // path -> loaded plugin
+	pyLoader *PyLoader                 // optional Python module loader
 }
 
 // NewLoader creates a Loader that will call OnLoad/OnUnload with the given
@@ -110,4 +114,76 @@ func (l *Loader) AllCommands() []Command {
 		cmds = append(cmds, m.Commands()...)
 	}
 	return cmds
+}
+
+// SetPyLoader configures the Python loader used by LoadPyFile and
+// LoadPyFromURL. It replaces any previously set PyLoader.
+func (l *Loader) SetPyLoader(pl *PyLoader) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pyLoader = pl
+}
+
+// PyLoaderInstance returns the currently configured PyLoader, or nil.
+func (l *Loader) PyLoaderInstance() *PyLoader {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.pyLoader
+}
+
+// LoadPyFile loads the .py file at path through the Python bridge, wraps it in
+// a PythonModule, and registers it with the kernel via LoadBuiltin.
+//
+// SetPyLoader must be called before invoking LoadPyFile.
+func (l *Loader) LoadPyFile(path string) error {
+	l.mu.Lock()
+	pl := l.pyLoader
+	l.mu.Unlock()
+
+	if pl == nil {
+		return fmt.Errorf("LoadPyFile: no PyLoader configured – call SetPyLoader first")
+	}
+
+	pyMod, err := pl.LoadFromFile(path)
+	if err != nil {
+		return fmt.Errorf("LoadPyFile %q: %w", path, err)
+	}
+
+	pm := NewPythonModule(pl.bridge, pyMod)
+	return l.LoadBuiltin(pm)
+}
+
+// LoadPyFromURL downloads a .py module from url, saves it under destDir, and
+// loads it through the Python bridge exactly like LoadPyFile.
+//
+// SetPyLoader must be called before invoking LoadPyFromURL.
+func (l *Loader) LoadPyFromURL(url, destDir string) error {
+	l.mu.Lock()
+	pl := l.pyLoader
+	l.mu.Unlock()
+
+	if pl == nil {
+		return fmt.Errorf("LoadPyFromURL: no PyLoader configured – call SetPyLoader first")
+	}
+
+	pyMod, err := pl.LoadFromURL(url, destDir)
+	if err != nil {
+		return fmt.Errorf("LoadPyFromURL %q: %w", url, err)
+	}
+
+	pm := NewPythonModule(pl.bridge, pyMod)
+	return l.LoadBuiltin(pm)
+}
+
+// NewPyLoaderFromBridge is a convenience constructor that creates a PyLoader
+// using the Loader's kernel reference and registers it on the Loader.
+// The bridge must already be initialised (pybridge.NewBridge).
+func (l *Loader) NewPyLoaderFromBridge(bridge *pybridge.Bridge) *PyLoader {
+	l.mu.Lock()
+	k := l.kernel
+	l.mu.Unlock()
+
+	pl := NewPyLoader(bridge, k)
+	l.SetPyLoader(pl)
+	return pl
 }
