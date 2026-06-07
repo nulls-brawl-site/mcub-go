@@ -575,7 +575,8 @@ def _mcub_load_module(file_path, mod_name):
 
 
 def _mcub_call_command(mod_name, cmd_name,
-                       session_id, chat_id, msg_id, text, sender_id):
+                       session_id, chat_id, msg_id, text, sender_id,
+                       pipe_input="", is_piped=False):
     """Invoke a stored command handler with a synthetic Event."""
     mcub_compat = sys.modules.get("mcub_compat")
     if mcub_compat is None:
@@ -612,11 +613,29 @@ def _mcub_call_command(mod_name, cmd_name,
                 kp.client._session_id = session_id
 
     event = Event(session_id, chat_id, msg_id, text, sender_id)
+    # Wire pipeline state into the event
+    event.piped = bool(is_piped)
+    event.pipe_input = pipe_input or ""
 
     if asyncio.iscoroutinefunction(handler):
         asyncio.run(handler(event))
     else:
         handler(event)
+
+
+def _mcub_purge_module(mod_name):
+    """Remove a module (and related entries) from sys.modules."""
+    to_remove = [k for k in sys.modules if k == mod_name or k.startswith(mod_name + ".")]
+    for k in to_remove:
+        sys.modules.pop(k, None)
+    mcub_compat = sys.modules.get("mcub_compat")
+    if mcub_compat is not None:
+        _command_handlers = mcub_compat._command_handlers
+        _module_instances  = mcub_compat._module_instances
+        for key in list(_command_handlers.keys()):
+            if key[0] == mod_name:
+                del _command_handlers[key]
+        _module_instances.pop(mod_name, None)
 `
 
 // Bridge manages the embedded CPython interpreter.  Create exactly one Bridge
@@ -858,10 +877,13 @@ func (b *Bridge) CallPyCommand(modName, cmdName string, ev BridgeEvent) error {
 	}
 	defer C.Py_DecRef(callFn)
 
-	// Build args: (mod_name, cmd_name, session_id, chat_id, msg_id, text, sender_id)
+	// Build args: (mod_name, cmd_name, session_id, chat_id, msg_id, text, sender_id,
+	//              pipe_input, is_piped)
 	cModName := C.CString(modName)
 	cCmdName := C.CString(cmdName)
 	cText := C.CString(ev.Text)
+	pipeInputStr := ev.PipeInput
+	cPipeInput := C.CString(pipeInputStr)
 
 	pyModName := C.PyUnicode_FromString(cModName)
 	pyCmdName := C.PyUnicode_FromString(cCmdName)
@@ -870,14 +892,21 @@ func (b *Bridge) CallPyCommand(modName, cmdName string, ev BridgeEvent) error {
 	pyMsgID := C.PyLong_FromLongLong(C.longlong(ev.MessageID))
 	pyText := C.PyUnicode_FromString(cText)
 	pySenderID := C.PyLong_FromLongLong(C.longlong(ev.SenderID))
+	pyPipeInput := C.PyUnicode_FromString(cPipeInput)
+	isPipedLong := C.long(0)
+	if ev.IsPiped {
+		isPipedLong = C.long(1)
+	}
+	pyIsPiped := C.PyBool_FromLong(isPipedLong)
 
 	C.free(unsafe.Pointer(cModName))
 	C.free(unsafe.Pointer(cCmdName))
 	C.free(unsafe.Pointer(cText))
+	C.free(unsafe.Pointer(cPipeInput))
 
 	if pyModName == nil || pyCmdName == nil ||
 		pySessID == nil || pyChatID == nil || pyMsgID == nil ||
-		pyText == nil || pySenderID == nil {
+		pyText == nil || pySenderID == nil || pyPipeInput == nil || pyIsPiped == nil {
 		C.Py_XDECREF(pyModName)
 		C.Py_XDECREF(pyCmdName)
 		C.Py_XDECREF(pySessID)
@@ -885,10 +914,12 @@ func (b *Bridge) CallPyCommand(modName, cmdName string, ev BridgeEvent) error {
 		C.Py_XDECREF(pyMsgID)
 		C.Py_XDECREF(pyText)
 		C.Py_XDECREF(pySenderID)
+		C.Py_XDECREF(pyPipeInput)
+		C.Py_XDECREF(pyIsPiped)
 		return errors.New("pybridge: out of memory building call args")
 	}
 
-	args := C.PyTuple_New(7)
+	args := C.PyTuple_New(9)
 	if args == nil {
 		C.Py_DecRef(pyModName)
 		C.Py_DecRef(pyCmdName)
@@ -897,6 +928,8 @@ func (b *Bridge) CallPyCommand(modName, cmdName string, ev BridgeEvent) error {
 		C.Py_DecRef(pyMsgID)
 		C.Py_DecRef(pyText)
 		C.Py_DecRef(pySenderID)
+		C.Py_DecRef(pyPipeInput)
+		C.Py_DecRef(pyIsPiped)
 		return errors.New("pybridge: out of memory building tuple")
 	}
 	C.PyTuple_SetItem(args, 0, pyModName)
@@ -906,11 +939,55 @@ func (b *Bridge) CallPyCommand(modName, cmdName string, ev BridgeEvent) error {
 	C.PyTuple_SetItem(args, 4, pyMsgID)
 	C.PyTuple_SetItem(args, 5, pyText)
 	C.PyTuple_SetItem(args, 6, pySenderID)
+	C.PyTuple_SetItem(args, 7, pyPipeInput)
+	C.PyTuple_SetItem(args, 8, pyIsPiped)
 
 	result := C.PyObject_Call(callFn, args, nil)
 	C.Py_DecRef(args)
 	if result == nil {
 		return b.pyError(fmt.Sprintf("CallPyCommand(%q.%q)", modName, cmdName))
+	}
+	C.Py_DecRef(result)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Module purge
+// ---------------------------------------------------------------------------
+
+// PurgePyModule calls _mcub_purge_module(modName) in __main__, removing the
+// module from sys.modules and clearing its command handlers.
+func (b *Bridge) PurgePyModule(modName string) error {
+	state := C.PyGILState_Ensure()
+	defer C.PyGILState_Release(state)
+
+	purgeFnNameC := C.CString("_mcub_purge_module")
+	purgeFn := C.mcub_get_main_fn(purgeFnNameC)
+	C.free(unsafe.Pointer(purgeFnNameC))
+	if purgeFn == nil {
+		// Function not yet defined (older bootstrap) – not fatal.
+		return nil
+	}
+	defer C.Py_DecRef(purgeFn)
+
+	cName := C.CString(modName)
+	pyName := C.PyUnicode_FromString(cName)
+	C.free(unsafe.Pointer(cName))
+	if pyName == nil {
+		return errors.New("pybridge: PurgePyModule: out of memory")
+	}
+
+	args := C.PyTuple_New(1)
+	if args == nil {
+		C.Py_DecRef(pyName)
+		return errors.New("pybridge: PurgePyModule: out of memory")
+	}
+	C.PyTuple_SetItem(args, 0, pyName)
+
+	result := C.PyObject_Call(purgeFn, args, nil)
+	C.Py_DecRef(args)
+	if result == nil {
+		return b.pyError(fmt.Sprintf("PurgePyModule(%q)", modName))
 	}
 	C.Py_DecRef(result)
 	return nil

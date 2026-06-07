@@ -610,6 +610,30 @@ class Event:
         self.message = message_obj or _MessageProxy(msg_id, text, sender_id)
         self.out = True  # MCUB always processes its own messages
 
+        # ---- Pipeline support ----
+        # Set by _mcub_call_command when the command is part of a pipeline.
+        self.piped = False           # True when running inside a pipeline
+        self.pipe_input = None       # text output from the preceding | segment
+        self.pipe_output = None      # text this command wants to pass to the next segment
+        self.pipe_exit_code = 0      # 0 = success, non-zero = failure
+        self.no_add_args_to_input = False  # suppress auto-arg-appending in pipe mode
+
+    # ---- Pipeline helper methods ------------------------------------------------
+
+    def set_pipe_output(self, text):
+        """Set what this command outputs to the pipe.
+
+        Modules can call this instead of (or in addition to) event.edit() when
+        they want fine-grained control over what the next piped command receives.
+        """
+        self.pipe_output = str(text) if text is not None else ""
+
+    def get_pipe_input(self):
+        """Return the input received from the preceding pipe segment, or ''."""
+        return self.pipe_input or ""
+
+    # ---- Telegram operations ---------------------------------------------------
+
     async def edit(self, text, parse_mode="html", **kwargs):
         return _mcub_go.edit_message(
             self._session_id, self.chat_id, self.id,
@@ -1233,6 +1257,23 @@ class KernelProxy:
         keys_to_remove = [k for k in _command_handlers if k[0] == module_name]
         for k in keys_to_remove:
             del _command_handlers[k]
+
+    async def _execute_pipeline(self, event, pipeline, depth=0):
+        """Pipeline execution stub – pipelines are handled by the Go kernel.
+
+        Python modules that call this (e.g. utils-piped script engine) will get
+        a no-op so that they don't crash.  The actual pipeline orchestration is
+        done in internal/kernel/pipeline.go.
+        """
+        return False
+
+    def get_prefix_for_sender(self, sender_id):
+        """Return the command prefix active for a given sender.
+
+        The Go kernel uses a single global prefix; sender-specific prefixes are
+        not yet supported, so we always return the global prefix.
+        """
+        return _mcub_go.get_prefix()
 
 
 # ============================================================

@@ -14,6 +14,11 @@ type BridgeEvent struct {
 	Text      string
 	SenderID  int64
 
+	// Pipeline support – set when the command is dispatched as part of a
+	// pipeline.  Python sees these as event.piped and event.pipe_input.
+	PipeInput string
+	IsPiped   bool
+
 	// Telegram operation callbacks – set by the caller before registering the
 	// session.  Each closure is responsible for using the right context,
 	// peer IDs, etc.

@@ -6,10 +6,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nulls-brawl-site/mcub-go/internal/cache"
 	"github.com/nulls-brawl-site/mcub-go/internal/config"
 	"github.com/nulls-brawl-site/mcub-go/internal/database"
 	"github.com/nulls-brawl-site/mcub-go/internal/loader"
 	"github.com/nulls-brawl-site/mcub-go/internal/logger"
+	"github.com/nulls-brawl-site/mcub-go/internal/permissions"
+	"github.com/nulls-brawl-site/mcub-go/internal/scheduler"
 	mcubclient "github.com/nulls-brawl-site/telegram-mcub-go/client"
 	"github.com/nulls-brawl-site/telegram-mcub-go/events"
 )
@@ -89,13 +92,27 @@ type Kernel struct {
 	ShutdownFlag bool
 
 	// --- Subsystems ---
-	DB     *database.Database
-	Log    *logger.Logger
-	Loader *loader.Loader
-	Client *mcubclient.MCUBClient
+	DB          *database.Database
+	Log         *logger.Logger
+	Loader      *loader.Loader
+	Client      *mcubclient.MCUBClient
+	Cache       *cache.TTLCache
+	Scheduler   *scheduler.TaskScheduler
+	Permissions *permissions.CallbackPermissionManager
 
 	// --- Middleware ---
 	middlewares []Middleware
+
+	// --- Generic middleware chains (ported from kernel_handlers.py) ---
+	middlewareChain        []MiddlewareFunc
+	requestMiddlewareChain []RequestMiddlewareFunc
+
+	// --- Inline / callback handler registries ---
+	// key -> handler (opaque); populated by RegisterInlineHandler /
+	// RegisterCallbackHandler.
+	inlineHandlers      map[string]interface{}
+	inlineHandlerOwners map[string]string // key -> module name
+	callbackHandlers    map[string]interface{}
 }
 
 // New creates a new Kernel with sane defaults.
@@ -116,12 +133,20 @@ func New(cfg *config.Config, configFile string, kType KernelType) *Kernel {
 		LoadedModules:    make(map[string]Module),
 		SystemModules:    make(map[string]Module),
 		Aliases:          cfg.Aliases,
-		ModuleSources:    make(map[string]ModuleSource),
-		ModulesDir:       "modules",
-		ModulesLoadedDir: "modules_loaded",
-		Log:              log,
+		ModuleSources:          make(map[string]ModuleSource),
+		ModulesDir:             "modules",
+		ModulesLoadedDir:       "modules_loaded",
+		Log:                    log,
+		inlineHandlers:         make(map[string]interface{}),
+		inlineHandlerOwners:    make(map[string]string),
+		callbackHandlers:       make(map[string]interface{}),
+		middlewareChain:        nil,
+		requestMiddlewareChain: nil,
 	}
 	k.Loader = loader.NewLoader(k)
+	k.Cache = cache.New(500, 10*time.Minute)
+	k.Scheduler = scheduler.New(log)
+	k.Permissions = permissions.New()
 	return k
 }
 
@@ -252,4 +277,41 @@ func (k *Kernel) GetLogIface() loader.LogIface {
 // GetBridge returns the Python bridge stored during Init.
 func (k *Kernel) GetBridge() interface{} {
 	return k.PyBridge
+}
+
+// CommandsOwnedBy returns a snapshot of command names owned by moduleName.
+func (k *Kernel) CommandsOwnedBy(moduleName string) []string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	var cmds []string
+	for cmd, owner := range k.CommandOwners {
+		if owner == moduleName {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return cmds
+}
+
+// AliasesForModule returns all alias names that point to commands owned by
+// moduleName.
+func (k *Kernel) AliasesForModule(moduleName string) []string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	var aliases []string
+	for alias, target := range k.Aliases {
+		if owner, ok := k.CommandOwners[target]; ok && owner == moduleName {
+			aliases = append(aliases, alias)
+		}
+	}
+	return aliases
+}
+
+// GetModulesDir returns the path to the modules directory.
+func (k *Kernel) GetModulesDir() string {
+	return k.ModulesDir
+}
+
+// GetModulesLoadedDir returns the path to the loaded-modules directory.
+func (k *Kernel) GetModulesLoadedDir() string {
+	return k.ModulesLoadedDir
 }

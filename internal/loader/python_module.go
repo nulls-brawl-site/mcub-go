@@ -116,8 +116,18 @@ func (m *PythonModule) makeHandler(pyCmd pybridge.PyCommand) CommandHandler {
 			SenderID:  ev.SenderID,
 		}
 
+		// Propagate pipeline state from context into the bridge event.
+		if pipeState := pybridge.PipelineCaptureFromContext(ctx); pipeState != nil {
+			bridgeEv.PipeInput = pipeState.Input
+			bridgeEv.IsPiped = pipeState.IsPiped
+		}
+
 		if client != nil {
 			bridgeEv.EditFn = func(newText string) error {
+				// If a pipeline capture is active, record the edit text as output.
+				if pipeState := pybridge.PipelineCaptureFromContext(ctx); pipeState != nil {
+					pipeState.Capture(newText)
+				}
 				_, err := client.EditMessage(ctx, mcubclient.EditMessageParams{
 					PeerID:    chatID,
 					MessageID: int(msgID),

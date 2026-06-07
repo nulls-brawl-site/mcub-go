@@ -3,7 +3,6 @@ package kernel
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/nulls-brawl-site/telegram-mcub-go/events"
 )
@@ -11,50 +10,25 @@ import (
 const maxAliasDepth = 5
 
 // ProcessCommand parses a NewMessage event and dispatches it to the registered
-// command handler. It mirrors the Python process_command logic.
+// command handler.  It detects pipeline expressions and delegates to
+// ExecutePipeline when applicable.
 //
 // Flow:
 //  1. Verify the message starts with the active prefix.
-//  2. Split the command word from optional arguments.
-//  3. Resolve aliases (recursive, capped at maxAliasDepth).
-//  4. Look up and invoke the handler.
+//  2. If the text contains pipeline operators, parse and execute as pipeline.
+//  3. Otherwise resolve aliases and dispatch to the single handler.
 func (k *Kernel) ProcessCommand(ctx context.Context, ev *events.NewMessage) error {
 	text := ev.Text()
-	prefix := k.Prefix()
 
-	if !strings.HasPrefix(text, prefix) {
-		return nil // Not a command.
+	// Pipeline detection: if the text has pipeline operators, execute as pipeline.
+	if IsPipeline(text) {
+		segs := ParsePipeline(text)
+		if len(segs) > 1 {
+			return k.ExecutePipeline(ctx, ev, segs)
+		}
 	}
 
-	// Strip prefix and split into command + args.
-	body := strings.TrimPrefix(text, prefix)
-	if body == "" {
-		return nil
-	}
-
-	parts := strings.Fields(body)
-	if len(parts) == 0 {
-		return nil
-	}
-
-	cmdWord := strings.ToLower(parts[0])
-
-	// Resolve aliases up to maxAliasDepth levels deep.
-	resolved, err := k.resolveAlias(cmdWord, maxAliasDepth)
-	if err != nil {
-		return err
-	}
-
-	k.mu.RLock()
-	handler, found := k.CommandHandlers[resolved]
-	k.mu.RUnlock()
-
-	if !found {
-		// Unknown command – silently ignore (matches Python behaviour).
-		return nil
-	}
-
-	return handler(ctx, ev)
+	return k.dispatchSingleCommand(ctx, ev)
 }
 
 // resolveAlias recursively follows alias chains.
