@@ -4,11 +4,15 @@ package web
 
 import (
 	"context"
+	"embed"
 	"fmt"
 	"net/http"
 	"sync"
 	"time"
 )
+
+//go:embed static
+var staticFiles embed.FS
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Server
@@ -85,6 +89,9 @@ func (s *Server) Addr() string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (s *Server) registerRoutes() {
+	// Serve embedded static files (web panel UI) at /
+	s.mux.Handle("/", http.FileServer(http.FS(staticFiles)))
+
 	// Public endpoints (no auth required)
 	s.mux.HandleFunc("/api/auth/login", s.handleLogin)
 	s.mux.HandleFunc("/api/auth/status", s.handleAuthStatus)

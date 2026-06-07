@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>MCUB Panel</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body { background: #1a1a2e; color: #eee; font-family: 'Courier New', monospace; margin: 0; padding: 20px; }
+        a { color: #4a9eff; }
+        h2, h3 { margin-top: 0; }
+        .header { color: #4a9eff; font-size: 24px; font-weight: bold; margin-bottom: 20px; }
+        .card { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 16px; margin: 10px 0; }
+        .status-ok  { color: #4ade80; }
+        .status-err { color: #f87171; }
+        .status-warn { color: #facc15; }
+        button {
+            background: #0f3460; color: #eee; border: none;
+            padding: 8px 16px; border-radius: 4px; cursor: pointer;
+            margin: 4px 2px;
+        }
+        button:hover { background: #1a4a8a; }
+        button.danger { background: #7f1d1d; }
+        button.danger:hover { background: #991b1b; }
+        input[type=text], input[type=password] {
+            background: #0f3460; color: #eee; border: 1px solid #4a9eff;
+            padding: 6px 10px; border-radius: 4px; font-family: inherit; width: 100%;
+        }
+        table { width: 100%; border-collapse: collapse; }
+        td, th { padding: 8px 10px; text-align: left; border-bottom: 1px solid #0f3460; }
+        th { color: #4a9eff; }
+        code { background: #0f3460; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+        pre { background: #0f3460; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 0.85em; max-height: 300px; overflow-y: auto; }
+        #login-section { max-width: 360px; margin: 80px auto; }
+        #main-section { display: none; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; }
+        .badge-sys { background: #1e3a5f; color: #60a5fa; }
+        .badge-user { background: #1e3a1f; color: #4ade80; }
+        .row-flex { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        #log-output { max-height: 260px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+
+<!-- ── Login ─────────────────────────────────────────────────────────────── -->
+<div id="login-section" class="card">
+    <div class="header">MCUB Panel</div>
+    <h3>Sign In</h3>
+    <div id="login-error" class="status-err" style="display:none;margin-bottom:10px;"></div>
+    <input type="password" id="pw-input" placeholder="Password" style="margin-bottom:10px;" onkeydown="if(event.key==='Enter')doLogin()">
+    <br>
+    <button onclick="doLogin()">Login</button>
+    <p style="color:#aaa;font-size:0.85em;">Leave blank if no password is set.</p>
+</div>
+
+<!-- ── Main Panel ────────────────────────────────────────────────────────── -->
+<div id="main-section">
+    <div class="header">MCUB Panel</div>
+
+    <!-- Status card -->
+    <div class="card" id="status-card">
+        <div class="row-flex">
+            <span id="status-dot">&#9679;</span>
+            <span id="status-text">Loading...</span>
+            <button onclick="fetchStatus()">Refresh</button>
+            <button onclick="doLogout()" style="margin-left:auto;">Logout</button>
+        </div>
+    </div>
+
+    <!-- Modules -->
+    <div class="card">
+        <h3>Modules</h3>
+        <div id="modules-list">Loading...</div>
+        <div style="margin-top:10px;" class="row-flex">
+            <input type="text" id="load-path" placeholder="Path or URL to module" style="flex:1;">
+            <button onclick="loadModule()">Load</button>
+        </div>
+        <div id="load-result" style="margin-top:8px;font-size:0.9em;"></div>
+    </div>
+
+    <!-- Command runner -->
+    <div class="card">
+        <h3>Run Command</h3>
+        <div class="row-flex">
+            <input type="text" id="cmd-input" placeholder=".ping" style="flex:1;" onkeydown="if(event.key==='Enter')runCommand()">
+            <button onclick="runCommand()">Run</button>
+        </div>
+        <pre id="cmd-result" style="margin-top:10px;display:none;"></pre>
+    </div>
+
+    <!-- Logs -->
+    <div class="card">
+        <h3>Recent Log</h3>
+        <pre id="log-output">Loading...</pre>
+        <button onclick="fetchLog()">Refresh</button>
+    </div>
+
+    <!-- Danger zone -->
+    <div class="card">
+        <h3>Actions</h3>
+        <button class="danger" onclick="doRestart()">Restart Kernel</button>
+    </div>
+</div>
+
+<script>
+'use strict';
+
+// ── Auth helpers ──────────────────────────────────────────────────────────────
+function getToken() { return sessionStorage.getItem('mcub_token') || ''; }
+function setToken(t) { sessionStorage.setItem('mcub_token', t); }
+function clearToken() { sessionStorage.removeItem('mcub_token'); }
+
+function authHeaders() {
+    const tok = getToken();
+    return tok ? { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }
+               : { 'Content-Type': 'application/json' };
+}
+
+async function apiFetch(url, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign(authHeaders(), opts.headers || {});
+    const r = await fetch(url, opts);
+    if (r.status === 401) { showLogin(); return null; }
+    return r.json();
+}
+
+// ── Login / Logout ────────────────────────────────────────────────────────────
+async function doLogin() {
+    const pw = document.getElementById('pw-input').value;
+    const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+    });
+    const d = await r.json();
+    if (d.ok) {
+        setToken(d.result.token);
+        showMain();
+    } else {
+        const el = document.getElementById('login-error');
+        el.textContent = d.error || 'Login failed';
+        el.style.display = '';
+    }
+}
+
+function doLogout() {
+    clearToken();
+    showLogin();
+}
+
+// ── View switching ────────────────────────────────────────────────────────────
+function showLogin() {
+    document.getElementById('login-section').style.display = '';
+    document.getElementById('main-section').style.display = 'none';
+}
+
+function showMain() {
+    document.getElementById('login-section').style.display = 'none';
+    document.getElementById('main-section').style.display = '';
+    fetchStatus();
+    fetchModules();
+    fetchLog();
+}
+
+// ── Status ────────────────────────────────────────────────────────────────────
+async function fetchStatus() {
+    const d = await apiFetch('/api/status');
+    if (!d) return;
+    const el = document.getElementById('status-text');
+    const dot = document.getElementById('status-dot');
+    if (d.ok) {
+        const r = d.result;
+        dot.style.color = '#4ade80';
+        el.innerHTML = `<span class="status-ok">Online</span>` +
+            (r.version ? ` | Version: <code>${r.version}</code>` : '') +
+            (r.uptime  ? ` | Uptime: <code>${r.uptime}</code>`   : '') +
+            (r.prefix  ? ` | Prefix: <code>${r.prefix}</code>`   : '') +
+            (r.status  ? ` | <code>${r.status}</code>`           : '');
+    } else {
+        dot.style.color = '#f87171';
+        el.innerHTML = `<span class="status-err">Error: ${d.error}</span>`;
+    }
+}
+
+// ── Modules ───────────────────────────────────────────────────────────────────
+async function fetchModules() {
+    const d = await apiFetch('/api/modules');
+    const el = document.getElementById('modules-list');
+    if (!d) return;
+    if (!d.ok) { el.textContent = 'Error: ' + d.error; return; }
+
+    const mods = d.result;
+    if (!mods || mods.length === 0) {
+        el.textContent = 'No modules loaded.';
+        return;
+    }
+
+    if (Array.isArray(mods) && typeof mods[0] === 'string') {
+        // simple string list
+        el.innerHTML = '<table><tr><th>Module</th><th></th></tr>' +
+            mods.map(name => `<tr><td><code>${esc(name)}</code></td><td>
+                <button onclick="unloadModule('${esc(name)}')">Unload</button></td></tr>`
+            ).join('') + '</table>';
+    } else if (Array.isArray(mods)) {
+        // rich objects with name/type/commands
+        el.innerHTML = '<table><tr><th>Module</th><th>Type</th><th>Commands</th><th></th></tr>' +
+            mods.map(m => `<tr>
+                <td><code>${esc(m.name)}</code></td>
+                <td><span class="badge badge-${m.type==='system'?'sys':'user'}">${esc(m.type||'')}</span></td>
+                <td>${(m.commands||[]).map(c=>`<code>${esc(c)}</code>`).join(' ')}</td>
+                <td><button onclick="unloadModule('${esc(m.name)}')">Unload</button></td>
+            </tr>`).join('') + '</table>';
+    }
+}
+
+async function loadModule() {
+    const path = document.getElementById('load-path').value.trim();
+    const res = document.getElementById('load-result');
+    if (!path) { res.innerHTML = '<span class="status-warn">Enter a path or URL.</span>'; return; }
+    const d = await apiFetch('/api/modules/load', {
+        method: 'POST',
+        body: JSON.stringify({ path })
+    });
+    if (!d) return;
+    res.innerHTML = d.ok
+        ? `<span class="status-ok">Loaded: ${esc(path)}</span>`
+        : `<span class="status-err">Error: ${esc(d.error)}</span>`;
+    if (d.ok) fetchModules();
+}
+
+async function unloadModule(name) {
+    const d = await apiFetch('/api/modules/unload', {
+        method: 'POST',
+        body: JSON.stringify({ name })
+    });
+    if (!d) return;
+    if (!d.ok) alert('Error: ' + d.error);
+    fetchModules();
+}
+
+// ── Command ───────────────────────────────────────────────────────────────────
+async function runCommand() {
+    const cmd = document.getElementById('cmd-input').value.trim();
+    const out = document.getElementById('cmd-result');
+    if (!cmd) return;
+    const d = await apiFetch('/api/command', {
+        method: 'POST',
+        body: JSON.stringify({ command: cmd })
+    });
+    if (!d) return;
+    out.style.display = '';
+    out.textContent = d.ok ? (d.result.result || '(no output)') : ('Error: ' + d.error);
+}
+
+// ── Log ───────────────────────────────────────────────────────────────────────
+async function fetchLog() {
+    const d = await apiFetch('/api/log?n=100');
+    const el = document.getElementById('log-output');
+    if (!d) return;
+    if (!d.ok) { el.textContent = 'Error: ' + d.error; return; }
+    const lines = d.result;
+    el.textContent = Array.isArray(lines) ? lines.join('\n') : '(empty)';
+    el.scrollTop = el.scrollHeight;
+}
+
+// ── Restart ───────────────────────────────────────────────────────────────────
+async function doRestart() {
+    if (!confirm('Restart the kernel now?')) return;
+    const d = await apiFetch('/api/restart', { method: 'POST' });
+    if (!d) return;
+    alert(d.ok ? 'Restart scheduled.' : ('Error: ' + d.error));
+}
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+(async function init() {
+    // Check if already authenticated
+    if (getToken()) {
+        const d = await fetch('/api/auth/status', { headers: authHeaders() }).then(r => r.json()).catch(() => null);
+        if (d && d.ok && d.result && d.result.authenticated) {
+            showMain();
+            return;
+        }
+        clearToken();
+    }
+    // If no password is required, try to access directly
+    const statusD = await fetch('/api/status').then(r => r.json()).catch(() => null);
+    if (statusD && statusD.ok) {
+        showMain();
+        return;
+    }
+    showLogin();
+})();
+
+// Auto-refresh status every 15 seconds
+setInterval(() => {
+    if (document.getElementById('main-section').style.display !== 'none') {
+        fetchStatus();
+    }
+}, 15000);
+</script>
+</body>
+</html>
