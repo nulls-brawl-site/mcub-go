@@ -9,6 +9,7 @@ import (
 	"github.com/nulls-brawl-site/mcub-go/internal/cache"
 	"github.com/nulls-brawl-site/mcub-go/internal/config"
 	"github.com/nulls-brawl-site/mcub-go/internal/database"
+	"github.com/nulls-brawl-site/mcub-go/internal/inline"
 	"github.com/nulls-brawl-site/mcub-go/internal/loader"
 	"github.com/nulls-brawl-site/mcub-go/internal/logger"
 	"github.com/nulls-brawl-site/mcub-go/internal/permissions"
@@ -113,6 +114,10 @@ type Kernel struct {
 	inlineHandlers      map[string]interface{}
 	inlineHandlerOwners map[string]string // key -> module name
 	callbackHandlers    map[string]interface{}
+
+	// --- Inline subsystem ---
+	// InlineManager coordinates the inline bot and its handler registry.
+	InlineManager *inline.Manager
 }
 
 // New creates a new Kernel with sane defaults.
@@ -147,7 +152,18 @@ func New(cfg *config.Config, configFile string, kType KernelType) *Kernel {
 	k.Cache = cache.New(500, 10*time.Minute)
 	k.Scheduler = scheduler.New(log)
 	k.Permissions = permissions.New()
+	k.InlineManager = inline.NewManager(k)
 	return k
+}
+
+// GetAPIID returns the Telegram app ID configured for this kernel.
+func (k *Kernel) GetAPIID() int64 {
+	return k.APIID
+}
+
+// GetAPIHash returns the Telegram app hash configured for this kernel.
+func (k *Kernel) GetAPIHash() string {
+	return k.APIHash
 }
 
 // Prefix returns the active command prefix.

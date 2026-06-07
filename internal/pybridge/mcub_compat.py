@@ -41,6 +41,90 @@ except ImportError:
 
 
 # ============================================================
+# Langpack YAML loader
+# Reads en.yaml, ru.yaml (and others) so _SimpleStrings can resolve
+# module strings declared as {"name": "module_name"}.
+# ============================================================
+_LANGPACK_DATA: "dict[str, dict]" = {}  # locale -> {module -> {key -> value}}
+
+def _load_langpacks_yaml():
+    """Try to load langpack YAML files from known locations."""
+    import os
+    # Determine directory of this file (may not be defined when exec()'d)
+    try:
+        _this_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        _this_dir = os.getcwd()
+    # Candidate directories to search for langpack YAML files
+    _candidate_dirs = [
+        os.path.join(_this_dir, "..", "langpacks"),
+        "/tmp/opencode/mcub-go/internal/langpacks",
+        os.path.join(_this_dir, "..", "..", "internal", "langpacks"),
+        "core/langpacks",
+        "/tmp/opencode/MCUB-fork/core/langpacks",
+    ]
+    try:
+        import yaml as _yaml_lib
+    except ImportError:
+        return  # yaml not available - skip langpack loading
+
+    for _dir in _candidate_dirs:
+        if not os.path.isdir(_dir):
+            continue
+        try:
+            for _fname in os.listdir(_dir):
+                if not _fname.endswith(".yaml"):
+                    continue
+                _lang = _fname[:-5]
+                _fpath = os.path.join(_dir, _fname)
+                try:
+                    with open(_fpath, encoding="utf-8") as _f:
+                        _data = _yaml_lib.safe_load(_f)
+                    if isinstance(_data, dict):
+                        _LANGPACK_DATA[_lang] = _data
+                except Exception:
+                    pass
+            if _LANGPACK_DATA:
+                break  # Found and loaded from this directory
+        except Exception:
+            pass
+
+_load_langpacks_yaml()
+
+def _langpack_get(module_name, key, locale="en"):
+    """Look up a string from loaded langpack data.
+
+    Tries: requested locale -> base lang -> 'ru' -> 'en'.
+    Returns None if not found.
+    """
+    _FALLBACK_CHAIN = [locale]
+    # Append base lang if declared (e.g. linux.yaml has "lang: en")
+    _loc_data = _LANGPACK_DATA.get(locale, {})
+    _base = _loc_data.get("lang")
+    if isinstance(_base, str) and _base not in _FALLBACK_CHAIN:
+        _FALLBACK_CHAIN.append(_base)
+    for _fb in ("ru", "en"):
+        if _fb not in _FALLBACK_CHAIN:
+            _FALLBACK_CHAIN.append(_fb)
+
+    for _loc in _FALLBACK_CHAIN:
+        _pack = _LANGPACK_DATA.get(_loc, {})
+        _mod_strings = _pack.get(module_name)
+        if not isinstance(_mod_strings, dict):
+            continue
+        if key in _mod_strings:
+            _val = _mod_strings[key]
+            if isinstance(_val, str):
+                return _val
+            elif isinstance(_val, dict):
+                # Group value: try __value__ key
+                if "__value__" in _val:
+                    return str(_val["__value__"])
+                return str(key)
+    return None
+
+
+# ============================================================
 # Stub class factory
 # Returns a class that can stand in for any Telethon/core type.
 # Works as a type annotation, base class, decorator, or callable.
@@ -302,6 +386,47 @@ def loop(interval=60, autostart=False, **kwargs):
     return decorator
 
 
+def watcher(func=None, chataction=False, bot_client=False, **tags):
+    """Decorator for message watcher handlers."""
+    def decorator(f):
+        f._mcub_watcher = True
+        return f
+    if func is not None and callable(func):
+        return decorator(func)
+    return decorator
+
+
+def owner(func=None, only_admin=False, **kwargs):
+    """Decorator that restricts a command handler to the bot owner.
+    In the compat layer this is a passthrough - just marks the function."""
+    def decorator(f):
+        f._mcub_owner_only = True
+        return f
+    if func is not None and callable(func):
+        return decorator(func)
+    return decorator
+
+
+def on_install(func=None, **kwargs):
+    """Decorator for first-install callbacks."""
+    def decorator(f):
+        f._mcub_on_install = True
+        return f
+    if func is not None and callable(func):
+        return decorator(func)
+    return decorator
+
+
+def uninstall(func=None, **kwargs):
+    """Decorator for cleanup callbacks on module uninstall."""
+    def decorator(f):
+        f._mcub_uninstall = True
+        return f
+    if func is not None and callable(func):
+        return decorator(func)
+    return decorator
+
+
 # ============================================================
 # ModuleConfig classes
 # ============================================================
@@ -373,103 +498,117 @@ class ValidationError(Exception):
 
 
 class Boolean:
-    def __init__(self, default=False, **kwargs):
+    def __init__(self, key=None, default=False, **kwargs):
+        self.key = key
         self.default = default
 
 
 class String:
-    def __init__(self, default="", **kwargs):
+    def __init__(self, key=None, default="", **kwargs):
+        self.key = key
         self.default = default
 
 
 class Integer:
-    def __init__(self, default=0, **kwargs):
+    def __init__(self, key=None, default=0, **kwargs):
+        self.key = key
         self.default = default
 
 
 class Float:
-    def __init__(self, default=0.0, **kwargs):
+    def __init__(self, key=None, default=0.0, **kwargs):
+        self.key = key
         self.default = default
 
 
 class Choice:
-    def __init__(self, choices=None, default="", **kwargs):
+    def __init__(self, key=None, choices=None, default="", **kwargs):
+        self.key = key
         self.choices = choices or []
-        self.default = default if default != "" else (choices[0] if choices else "")
+        self.default = default if default != "" else (self.choices[0] if self.choices else "")
 
 
 class List:
     """Validator for list-type config values."""
-    def __init__(self, default=None, **kwargs):
+    def __init__(self, key=None, default=None, **kwargs):
+        self.key = key
         self.default = default if default is not None else []
 
 
 class Placeholders:
-    def __init__(self, default="", placeholder_scope="any", **kwargs):
+    def __init__(self, key=None, default="", placeholder_scope="any", **kwargs):
+        self.key = key
         self.default = default
 
 
 class URL:
     """URL validator stub."""
-    def __init__(self, default="", **kwargs):
+    def __init__(self, key=None, default="", **kwargs):
+        self.key = key
         self.default = default
 
 
 class Regex:
     """Regex-validated string stub."""
-    def __init__(self, default="", pattern=None, **kwargs):
+    def __init__(self, key=None, default="", pattern=None, **kwargs):
+        self.key = key
         self.default = default
         self.pattern = pattern
 
 
 class JSON:
     """JSON value validator stub."""
-    def __init__(self, default=None, **kwargs):
+    def __init__(self, key=None, default=None, **kwargs):
+        self.key = key
         self.default = default
 
 
 class Color:
     """Hex color validator stub."""
-    def __init__(self, default="#000000", **kwargs):
+    def __init__(self, key=None, default="#000000", **kwargs):
+        self.key = key
         self.default = default
 
 
 class Emoji:
     """Emoji validator stub."""
-    def __init__(self, default="", **kwargs):
+    def __init__(self, key=None, default="", **kwargs):
+        self.key = key
         self.default = default
 
 
 class MultiChoice:
     """Multi-choice validator stub."""
-    def __init__(self, choices=None, default=None, **kwargs):
+    def __init__(self, key=None, choices=None, default=None, **kwargs):
+        self.key = key
         self.choices = choices or []
         self.default = default if default is not None else []
 
 
 class Link(String):
     """URL/link validator stub."""
-    def __init__(self, default="", schemes=None, **kwargs):
-        super().__init__(default=default, **kwargs)
+    def __init__(self, key=None, default="", schemes=None, **kwargs):
+        super().__init__(key=key, default=default, **kwargs)
         self.schemes = schemes
 
 
 class RegExp(String):
     """Regex-validated string stub (alias for Regex)."""
-    def __init__(self, pattern="", default="", **kwargs):
-        super().__init__(default=default, **kwargs)
+    def __init__(self, key=None, pattern="", default="", **kwargs):
+        super().__init__(key=key, default=default, **kwargs)
         self.pattern = pattern
 
 
 class TelegramID(Integer):
     """Telegram ID validator stub."""
-    def __init__(self, default=0, **kwargs):
-        super().__init__(default=default, **kwargs)
+    def __init__(self, key=None, default=0, **kwargs):
+        super().__init__(key=key, default=default, **kwargs)
 
 
 class EntityLike:
     """Telegram entity validator stub."""
-    def __init__(self, default="", **kwargs):
+    def __init__(self, key=None, default="", **kwargs):
+        self.key = key
         self.default = default
 
 
@@ -482,14 +621,16 @@ class Union:
 
 class Secret:
     """Sensitive value validator stub."""
-    def __init__(self, default=None, **kwargs):
+    def __init__(self, key=None, default=None, **kwargs):
+        self.key = key
         self.default = default
         self.secret = True
 
 
 class Hidden:
     """Hidden value validator stub."""
-    def __init__(self, validator=None, default=None, **kwargs):
+    def __init__(self, key=None, validator=None, default=None, **kwargs):
+        self.key = key
         self.validator = validator
         self.default = default if default is not None else (validator.default if validator else None)
         self.secret = True
@@ -497,13 +638,15 @@ class Hidden:
 
 class NoneType:
     """None-only validator stub."""
-    def __init__(self, default=None, **kwargs):
+    def __init__(self, key=None, default=None, **kwargs):
+        self.key = key
         self.default = default
 
 
 class DictType:
     """Dictionary validator stub."""
-    def __init__(self, default=None, **kwargs):
+    def __init__(self, key=None, default=None, **kwargs):
+        self.key = key
         self.default = default if default is not None else {}
 
 
@@ -1352,6 +1495,14 @@ class _SimpleStrings:
 
     def _get(self, key):
         if isinstance(self._data, dict):
+            # If this is a langpack-ref dict ({"name": "module_name"}), look up
+            # in the loaded YAML langpack data first.
+            module_name = self._data.get("name")
+            if module_name and _LANGPACK_DATA:
+                val = _langpack_get(module_name, key, self._locale)
+                if val is not None:
+                    return val
+
             # Try locale-specific first
             locale_data = self._data.get(self._locale, self._data.get("en", {}))
             if isinstance(locale_data, dict) and key in locale_data:
@@ -1473,6 +1624,10 @@ class MCUBImportHook(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             mod.callback = callback
             mod.bot_command = bot_command
             mod.loop = loop
+            mod.watcher = watcher
+            mod.owner = owner
+            mod.on_install = on_install
+            mod.uninstall = uninstall
 
         elif name == "core.lib.loader.module_config":
             mod.ModuleConfig = ModuleConfig
