@@ -8,3 +8,5 @@ mcub.db-wal
 mcub
 modules/__pycache__/
 modules_loaded/__pycache__/
+modules_loaded/*.py
+modules_loaded/*.zip
