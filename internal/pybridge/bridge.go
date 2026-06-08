@@ -401,9 +401,11 @@ static PyObject* mcub_get_main_fn(const char* fn_name) {
 import "C"
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -768,6 +770,16 @@ func (b *Bridge) LoadPyModule(path string) (*PyModule, error) {
 	// Derive a Python-legal module name from the file name.
 	base := filepath.Base(path)
 	modName := strings.TrimSuffix(base, ".py")
+
+	// ── Parse and install # requires: dependencies before loading ────────────
+	// Matches pre_install_requirements() in dependency_manager_mixin.py.
+	if src, err := os.ReadFile(path); err == nil {
+		logFn := func(msg string) { fmt.Println("[pybridge/deps]", msg) }
+		errs := InstallRequires(context.Background(), string(src), modName, logFn)
+		for _, e := range errs {
+			fmt.Printf("[pybridge/deps] WARNING: %v\n", e)
+		}
+	}
 
 	// Acquire the GIL.
 	state := C.PyGILState_Ensure()
