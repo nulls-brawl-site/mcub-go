@@ -278,6 +278,11 @@ class ModuleBase:
             return k.client
         return self._client_obj or ClientProxy(0)
 
+    @client.setter
+    def client(self, value):
+        """Allow modules to do self.client = ... in __init__ / client_ready."""
+        self._client_obj = value
+
     # Button stub so modules can do self.Button.inline(...)
     class Button:
         """Stub for self.Button used by modules (e.g. man.py)."""
@@ -666,6 +671,39 @@ class Hidden:
         self.validator = validator
         self.default = default if default is not None else (validator.default if validator else None)
         self.secret = True
+
+
+class Series:
+    """Series (list) validator stub."""
+    def __init__(self, separator=",", *, min_len=None, max_len=None, validator=None, **kwargs):
+        self.separator = separator
+        self.min_len = min_len
+        self.max_len = max_len
+        self.validator = validator
+        self.default = []
+        self.internal_id = "Series"
+    def validate(self, value):
+        if isinstance(value, str):
+            result = [i.strip() for i in value.split(self.separator) if i.strip()]
+        elif hasattr(value, '__iter__') and not isinstance(value, (bytes, dict)):
+            result = list(value)
+        else:
+            result = [value] if value else []
+        return result
+
+
+class RandomLinkList(list):
+    """Random link list validator stub."""
+    def random(self):
+        import random as _r
+        return _r.choice(self) if self else None
+
+
+class RandomLink(Series):
+    """Random link series validator stub."""
+    def __init__(self):
+        super().__init__(min_len=1)
+        self.internal_id = "RandomLink"
 
 
 class NoneType:
@@ -1640,9 +1678,38 @@ class MCUBImportHook(importlib.abc.MetaPathFinder, importlib.abc.Loader):
     # Top-level names whose entire subtree we handle.
     _ROOTS = frozenset(("core", "telethon", "utils", "core_inline"))
 
+    # Submodules of telethon we let the REAL telethon handle (if installed),
+    # because modules like SenkoGuardian do `from telethon.utils import get_display_name`.
+    _TELETHON_PASSTHROUGH = frozenset((
+        "telethon.utils",
+        "telethon.extensions",
+        "telethon.extensions.html",
+        "telethon.helpers",
+        "telethon.crypto",
+        "telethon.errors",
+        "telethon.errors.rpcerrorlist",
+    ))
+
+    # Set at class-definition time (before the hook is installed) using
+    # importlib.util.find_spec which doesn't go through our meta_path hook.
+    # This avoids infinite recursion when _is_handled calls this method.
+    _real_telethon_cache: bool = (
+        importlib.util.find_spec("telethon") is not None
+    )
+
+    def _real_telethon_available(self) -> bool:
+        return MCUBImportHook._real_telethon_cache
+
     def _is_handled(self, fullname):
         root = fullname.split(".")[0]
-        return root in self._ROOTS
+        if root not in self._ROOTS:
+            return False
+        # When real telethon is installed, let it handle ALL telethon.* imports.
+        # The real package has proper __path__ so submodule imports work correctly.
+        # Our stubs for NewMessage etc. are grafted onto the real package after import.
+        if root == "telethon" and self._real_telethon_available():
+            return False
+        return True
 
     # --- MetaPathFinder -------------------------------------------------
 
@@ -1936,6 +2003,50 @@ for _pkg in _PKG_TREE:
         sys.modules[_pkg] = _mod
         _hook._populate(_pkg, _mod)
 
+# ── Use real telethon as base if available ─────────────────────────────────
+# Modules like SenkoGuardian do:
+#   from telethon.utils import get_display_name, get_peer_id
+#   from telethon.tl.functions.contacts import ...
+#   from telethon.tl.patched import ...
+# These only work when the real telethon package (with __path__) is in
+# sys.modules. Our _MagicStubModule stubs don't have __path__, so Python
+# marks them "not a package" and can't find submodules.
+#
+# Fix: if real telethon is installed, remove ALL our telethon.* stubs so
+# the real importer handles every telethon.* import. We then re-graft only
+# our faked telethon.events onto the real package so NewMessage/etc. stubs
+# remain accessible for modules that use them as decorators.
+try:
+    import importlib as _il
+    import importlib.util as _ilu
+
+    # Check real telethon exists WITHOUT importing (avoids sys.modules hit).
+    # find_spec raises ValueError if a stub is already in sys.modules with __spec__=None,
+    # so remove it first, then check.
+    sys.modules.pop("telethon", None)
+    _tl_spec = _ilu.find_spec("telethon")
+    if _tl_spec is not None:
+        # Save our faked events stub before clearing
+        _our_events_stub = sys.modules.get("telethon.events")
+
+        # Remove ALL our telethon.* stubs FIRST so import_module loads the real one
+        _tl_stubs = [k for k in list(sys.modules) if k == "telethon" or k.startswith("telethon.")]
+        for _k in _tl_stubs:
+            sys.modules.pop(_k, None)
+
+        # Now import the real telethon (sys.modules is clean for telethon.*)
+        _real_telethon = _il.import_module("telethon")
+
+        # Re-graft our faked events stub so bridge event dispatch still works.
+        # Modules that use real telethon events as decorators will get real ones,
+        # which is also fine — our bridge dispatcher doesn't rely on the stub type.
+        if _our_events_stub is not None:
+            sys.modules["telethon.events"] = _our_events_stub
+            _real_telethon.events = _our_events_stub
+
+except ImportError:
+    pass  # no real telethon installed — keep our stubs throughout
+
 # Ensure parent packages expose their children as attributes so that
 # ``import telethon; telethon.events.NewMessage`` works.
 sys.modules["core"].lib = sys.modules["core.lib"]
@@ -1946,14 +2057,19 @@ sys.modules["core.lib.loader"].repository = sys.modules["core.lib.loader.reposit
 sys.modules["core.lib"].utils = sys.modules["core.lib.utils"]
 sys.modules["core.lib.utils"].exceptions = sys.modules["core.lib.utils.exceptions"]
 sys.modules["core.lib.utils"].logger = sys.modules["core.lib.utils.logger"]
-sys.modules["telethon"].events = sys.modules["telethon.events"]
-sys.modules["telethon"].tl = sys.modules["telethon.tl"]
-sys.modules["telethon"].errors = sys.modules["telethon.errors"]
-sys.modules["telethon.tl"].types = sys.modules["telethon.tl.types"]
-sys.modules["telethon.tl"].functions = sys.modules["telethon.tl.functions"]
-sys.modules["telethon.tl.functions"].channels = sys.modules["telethon.tl.functions.channels"]
-sys.modules["telethon.tl.functions"].messages = sys.modules["telethon.tl.functions.messages"]
-sys.modules["telethon.errors"].rpcerrorlist = sys.modules["telethon.errors.rpcerrorlist"]
+def _safe_wire(parent, attr, child_key):
+    child = sys.modules.get(child_key)
+    if child is not None and parent in sys.modules:
+        setattr(sys.modules[parent], attr, child)
+
+_safe_wire("telethon", "events", "telethon.events")
+_safe_wire("telethon", "tl",     "telethon.tl")
+_safe_wire("telethon", "errors", "telethon.errors")
+_safe_wire("telethon.tl", "types",     "telethon.tl.types")
+_safe_wire("telethon.tl", "functions", "telethon.tl.functions")
+_safe_wire("telethon.tl.functions", "channels", "telethon.tl.functions.channels")
+_safe_wire("telethon.tl.functions", "messages", "telethon.tl.functions.messages")
+_safe_wire("telethon.errors", "rpcerrorlist", "telethon.errors.rpcerrorlist")
 sys.modules["utils"].strings = sys.modules["utils.strings"]
 sys.modules["utils"].restart = sys.modules["utils.restart"]
 sys.modules["utils"].arg_parser = sys.modules["utils.arg_parser"]
@@ -1969,7 +2085,70 @@ sys.modules["core_inline"].lib = sys.modules["core_inline.lib"]
 sys.modules["core_inline.lib"].manager = sys.modules["core_inline.lib.manager"]
 
 # Also expose telethon.types as alias for telethon.tl.types
-sys.modules["telethon"].types = sys.modules["telethon.types"]
+_safe_wire("telethon", "types", "telethon.types")
+
+# ── herokutl — Heroku userbot fork of Telethon ────────────────────────────
+# Modules that do `from herokutl.tl.types import ...` or
+# `from herokutl.utils import get_display_name` need this.
+# We alias herokutl.* → real telethon.* when telethon is installed,
+# otherwise fall back to our magic stubs.
+def _register_herokutl():
+    _real_tl = None
+    try:
+        import telethon as _real_tl
+    except ImportError:
+        pass
+
+    _ht_roots = [
+        ("herokutl",                          "telethon"),
+        ("herokutl.tl",                       "telethon.tl"),
+        ("herokutl.tl.types",                 "telethon.tl.types"),
+        ("herokutl.tl.functions",             "telethon.tl.functions"),
+        ("herokutl.tl.functions.messages",    "telethon.tl.functions.messages"),
+        ("herokutl.tl.functions.channels",    "telethon.tl.functions.channels"),
+        ("herokutl.tl.functions.users",       "telethon.tl.functions.users"),
+        ("herokutl.tl.functions.account",     "telethon.tl.functions.account"),
+        ("herokutl.tl.functions.photos",      "telethon.tl.functions.photos"),
+        ("herokutl.events",                   "telethon.events"),
+        ("herokutl.types",                    "telethon.tl.types"),
+        ("herokutl.errors",                   "telethon.errors"),
+        ("herokutl.errors.rpcerrorlist",      "telethon.errors.rpcerrorlist"),
+        ("herokutl.utils",                    "telethon.utils"),
+        ("herokutl.extensions",               "telethon.extensions"),
+        ("herokutl.extensions.html",          "telethon.extensions.html"),
+        ("herokutl.helpers",                  "telethon.helpers"),
+        ("herokutl.crypto",                   "telethon.crypto"),
+        ("herokutl.sessions",                 "telethon.sessions"),
+    ]
+
+    for ht_name, tl_name in _ht_roots:
+        if ht_name in sys.modules:
+            continue
+        # Try real telethon first, fall back to our stub
+        target = sys.modules.get(tl_name)
+        if target is None:
+            try:
+                target = importlib.import_module(tl_name)
+            except ImportError:
+                target = _MagicStubModule(ht_name)
+        sys.modules[ht_name] = target
+
+    # Wire parent attributes
+    if "herokutl" in sys.modules:
+        ht = sys.modules["herokutl"]
+        for attr, child in (
+            ("tl",         "herokutl.tl"),
+            ("events",     "herokutl.events"),
+            ("types",      "herokutl.types"),
+            ("errors",     "herokutl.errors"),
+            ("utils",      "herokutl.utils"),
+            ("extensions", "herokutl.extensions"),
+            ("helpers",    "herokutl.helpers"),
+        ):
+            if child in sys.modules:
+                setattr(ht, attr, sys.modules[child])
+
+_register_herokutl()
 
 # ============================================================
 # Hikka/Heroku Module Compatibility Layer
@@ -2356,6 +2535,9 @@ _hikka_validators_mod.DictType = DictType
 _hikka_validators_mod.List = List
 _hikka_validators_mod.ValidationError = ValidationError
 _hikka_validators_mod.Placeholders = Placeholders
+_hikka_validators_mod.Series = Series
+_hikka_validators_mod.RandomLink = RandomLink
+_hikka_validators_mod.RandomLinkList = RandomLinkList
 
 # Wire validators into loader now that the module is fully built
 _hikka_loader_mod.validators = _hikka_validators_mod
