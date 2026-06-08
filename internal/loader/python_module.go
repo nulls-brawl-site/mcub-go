@@ -214,8 +214,23 @@ func (m *PythonModule) makeHandler(pyCmd pybridge.PyCommand) CommandHandler {
 			}
 		}
 
-		bridgeEv.DownloadMediaFn = func(filePath string) error {
-			return fmt.Errorf("download_media not yet implemented")
+		if client != nil {
+			replyToID := ev.ReplyToMsgID
+			bridgeEv.DownloadMediaFn = func(filePath string) error {
+				if replyToID == 0 {
+					return fmt.Errorf("no reply message to download from")
+				}
+				_, err := client.DownloadMedia(ctx, mcubclient.DownloadMediaParams{
+					ChatID:    chatID,
+					MessageID: replyToID,
+					FilePath:  filePath,
+				})
+				return err
+			}
+		} else {
+			bridgeEv.DownloadMediaFn = func(filePath string) error {
+				return fmt.Errorf("download_media: no client available")
+			}
 		}
 
 		return m.bridge.CallPyCommand(m.pyMod.ModName, pyCmd.Name, bridgeEv)

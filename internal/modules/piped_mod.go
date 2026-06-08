@@ -31,7 +31,7 @@ type pipedModule struct {
 func newPipedModule() loader.Module { return &pipedModule{} }
 
 // Name implements loader.Module.
-func (m *pipedModule) Name() string { return "piped" }
+func (m *pipedModule) Name() string { return "utils-piped" }
 
 // OnLoad implements loader.Module.
 func (m *pipedModule) OnLoad(k interface{}) error {

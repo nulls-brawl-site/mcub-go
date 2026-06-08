@@ -1518,6 +1518,11 @@ class _SimpleStrings:
 
     def _get(self, key):
         if isinstance(self._data, dict):
+            # _cls_doc is a special Hikka metadata key that is the module description.
+            # Return it directly without locale lookup.
+            if key == "_cls_doc":
+                return str(self._data.get("_cls_doc", ""))
+
             # If this is a langpack-ref dict ({"name": "module_name"}), look up
             # in the loaded YAML langpack data first.
             module_name = self._data.get("name")
@@ -1993,6 +1998,23 @@ class _DBPointer:
         return f"<_DBPointer {self._module}.{self._key}>"
 
 
+class _AllModulesProxy:
+    """Proxy for Hikka's ``self.allmodules`` attribute."""
+
+    @property
+    def modules(self):
+        return list(_module_instances.values())
+
+    def lookup(self, name):
+        return _module_instances.get(name)
+
+    def __iter__(self):
+        return iter(_module_instances.values())
+
+    def __len__(self):
+        return len(_module_instances)
+
+
 class _HikkaModule(ModuleBase):
     """Base class for Hikka-compatible modules.
 
@@ -2056,10 +2078,19 @@ class _HikkaModule(ModuleBase):
                 }))
 
     def __init__(self, kernel=None, client=None, register=None):
+        # Hikka modules can be instantiated with no args (old style)
+        # OR with (kernel, client, register) like MCUB.
+        if kernel is None and client is None:
+            mod_name = getattr(type(self), 'name', type(self).__name__)
+            kernel = KernelProxy(0, mod_name)
+            client = ClientProxy(0)
+            register = _RegisterProxy(mod_name)
         super().__init__(kernel, client, register)
         # Set up Hikka-style db proxy
         self.db = _HikkaDB()
         self._db = self.db
+        # Hikka allmodules reference
+        self.allmodules = _AllModulesProxy()
         # Override strings with a version that also handles nested locale dicts
         raw_str = None
         for klass in type(self).__mro__:
@@ -2245,6 +2276,10 @@ _hikka_utils_mod.escape_html = (
     .replace(">", "&gt;")
 )
 _hikka_utils_mod.get_chat_id = lambda m: getattr(m, "chat_id", 0)
+_hikka_utils_mod.get_entity_id = lambda e: getattr(e, "id", 0)
+_hikka_utils_mod.answer = lambda *a, **kw: None
+_hikka_utils_mod.get_link = lambda e: ""
+_hikka_utils_mod.get_display_name = lambda e: getattr(e, "first_name", "") or str(e)
 
 # ─── Heroku userbot compat ────────────────────────────────────────────────────
 
@@ -2296,23 +2331,36 @@ def _register_mcub_compat_module():
 
     _mod = types.ModuleType("mcub_compat")
     _mod.__file__ = __file__ if "__file__" in dir() else "<mcub_compat>"
-    # Expose the key public symbols that other code may import.
+    # Expose ALL public symbols that other code may import.
     _mod._command_handlers = _command_handlers
     _mod._module_instances = _module_instances
     _mod.ModuleBase = ModuleBase
+    _mod._HikkaModule = _HikkaModule
     _mod.KernelProxy = KernelProxy
     _mod.ClientProxy = ClientProxy
+    _mod._RegisterProxy = _RegisterProxy      # was missing
+    _mod._InfiniteLoop = _InfiniteLoop        # was missing
+    _mod._AllModulesProxy = _AllModulesProxy  # was missing
     _mod.Event = Event
     _mod.command = command
-    _mod.watcher = watcher
-    _mod.inline = inline
     _mod.callback = callback
+    _mod.bot_command = bot_command
+    _mod.inline = inline
     _mod.loop = loop
+    _mod.watcher = watcher
+    _mod.owner = owner
+    _mod.on_install = on_install
+    _mod.uninstall = uninstall
     _mod.ModuleConfig = ModuleConfig
     _mod.ConfigValue = ConfigValue
+    _mod.Boolean = Boolean
+    _mod.String = String
+    _mod.Integer = Integer
+    _mod.Float = Float
+    _mod.Choice = Choice
     _mod._SimpleStrings = _SimpleStrings
     _mod._SimpleCache = _SimpleCache
-    _mod._HikkaModule = _HikkaModule
+    _mod._make_bound = _make_bound
     _mod._HikkaDB = _HikkaDB
     sys.modules["mcub_compat"] = _mod
 

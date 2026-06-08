@@ -61,7 +61,7 @@ type backupModule struct {
 func newBackupModule() loader.Module { return &backupModule{} }
 
 // Name implements loader.Module.
-func (m *backupModule) Name() string { return "backup" }
+func (m *backupModule) Name() string { return "userbot-backup" }
 
 // OnLoad implements loader.Module.
 func (m *backupModule) OnLoad(k interface{}) error {

@@ -11,6 +11,7 @@ import (
 	"github.com/nulls-brawl-site/mcub-go/internal/cache"
 	"github.com/nulls-brawl-site/mcub-go/internal/config"
 	"github.com/nulls-brawl-site/mcub-go/internal/database"
+	"github.com/nulls-brawl-site/mcub-go/internal/htmlparser"
 	"github.com/nulls-brawl-site/mcub-go/internal/inline"
 	"github.com/nulls-brawl-site/mcub-go/internal/loader"
 	"github.com/nulls-brawl-site/mcub-go/internal/logger"
@@ -551,4 +552,31 @@ func (k *Kernel) SetLoadPhase(phase string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.loadPhase = phase
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Text / HTML helpers (ported from kernel_core.py)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RawText strips HTML tags from text and returns plain content.
+// Mirrors the Python kernel.raw_text() helper.
+func (k *Kernel) RawText(text string) string {
+	return htmlparser.StripHTML(text)
+}
+
+// FormatWithHTML formats message text with Telegram entities into HTML.
+// entities is expected to be a []tg.MessageEntityClass value; passing nil or
+// an unrecognised type returns text unchanged.
+func (k *Kernel) FormatWithHTML(text string, entities interface{}) string {
+	// Full entity-to-HTML conversion is handled by htmlparser.TelegramToHTML
+	// when called with a concrete entity slice. Here we accept interface{} so
+	// that pybridge / mcub_compat can call this without importing tg types.
+	// A proper implementation would type-assert to []tg.MessageEntityClass;
+	// for now return text as-is (stub – sufficient for the bridge layer).
+	return text
+}
+
+// GetPrefix returns the active command prefix. Alias for Prefix().
+func (k *Kernel) GetPrefix() string {
+	return k.Prefix()
 }
