@@ -1348,3 +1348,17 @@ config:
   btn_close: "❌ Close"
   kernel_config_title_short: Kernel Config - {page}
   modules_config_title_short: Modules Config - {page}
+payments:
+  loading: "<tg-emoji emoji-id=\"5341715473882955310\">⚙️</tg-emoji> <i>Loading...</i>"
+  stars_title: "<tg-emoji emoji-id=\"5438496463044752972\">⭐️</tg-emoji> <b>Stars Balance</b>"
+  stars_balance: "💎 <b>Balance:</b> <code>{balance} ★</code>"
+  history_title: "<tg-emoji emoji-id=\"5438496463044752972\">⭐️</tg-emoji> <b>Stars History</b> (last {count})"
+  history_empty: "<i>No transactions found.</i>"
+  history_footer: "\n<i>Use .starshistory [limit] for more</i>"
+  tx_in: "<tg-emoji emoji-id=\"5244837092042750681\">📈</tg-emoji> <code>+{amount} ★</code> — {date} — {peer}"
+  tx_out: "<tg-emoji emoji-id=\"5246762912428603768\">📉</tg-emoji> <code>-{amount} ★</code> — {date} — {peer}"
+  gifts_title: "<tg-emoji emoji-id=\"5461151367559141950\">🎉</tg-emoji> <b>Saved Star Gifts</b>"
+  gifts_empty: "<i>No saved star gifts.</i>"
+  gift_item: "• <b>Gift #{index}</b>: <code>{info}</code>"
+  error: "<tg-emoji emoji-id=\"5388785832956016892\">❌</tg-emoji> <b>Error:</b> <code>{err}</code>"
+  limit_invalid: "<tg-emoji emoji-id=\"5388785832956016892\">❌</tg-emoji> Invalid limit. Use a number 1-50."

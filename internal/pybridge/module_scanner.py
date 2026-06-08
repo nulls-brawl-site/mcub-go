@@ -249,9 +249,14 @@ def scan_module(module_obj):
         result["name"] = _str_attr(module_class, "name", module_class.__name__)
         result["version"] = _str_attr(module_class, "version", "1.0.0")
         result["author"] = _str_attr(module_class, "author", "unknown")
-        # For Hikka modules, the name may be in strings["name"] or strings["en"]["name"]
+        # For Hikka modules, the name may be in strings["name"] or strings["en"]["name"].
+        # Only use strings["name"] as a fallback when the class does NOT define an explicit
+        # ``name`` attribute – i.e. the class body has no ``name = "..."`` line.
+        # MCUB-style modules always set ``name`` explicitly and strings["name"] is only the
+        # Hikka-compat display alias (e.g. "mcub_info" for "MCUB_info").
+        _has_explicit_name = "name" in module_class.__dict__
         raw_strings = getattr(module_class, "strings", {}) or {}
-        if isinstance(raw_strings, dict):
+        if isinstance(raw_strings, dict) and not _has_explicit_name:
             hikka_name = raw_strings.get("name")
             if hikka_name is None and isinstance(raw_strings.get("en"), dict):
                 hikka_name = raw_strings["en"].get("name")
@@ -281,13 +286,21 @@ def scan_module(module_obj):
         if hikka_cls is not None:
             result["style"] = "hikka"
             result["commands"] = hikka_cmds
-            raw_strings = getattr(hikka_cls, "strings", {}) or {}
-            if isinstance(raw_strings, dict):
-                hikka_name = raw_strings.get("name")
-                if hikka_name is None and isinstance(raw_strings.get("en"), dict):
-                    hikka_name = raw_strings["en"].get("name")
-                if hikka_name:
-                    result["name"] = str(hikka_name)
+            # Prefer explicit ``name`` class attribute over strings["name"].
+            _hcls_name = _str_attr(hikka_cls, "name", "unknown")
+            _hcls_has_name = "name" in hikka_cls.__dict__
+            if _hcls_has_name and _hcls_name not in ("unknown", "unnamed"):
+                result["name"] = _hcls_name
+            else:
+                raw_strings = getattr(hikka_cls, "strings", {}) or {}
+                if isinstance(raw_strings, dict):
+                    hikka_name = raw_strings.get("name")
+                    if hikka_name is None and isinstance(raw_strings.get("en"), dict):
+                        hikka_name = raw_strings["en"].get("name")
+                    if hikka_name:
+                        result["name"] = str(hikka_name)
+                elif _hcls_has_name:
+                    result["name"] = _hcls_name
             result["version"] = _str_attr(hikka_cls, "version", "1.0.0")
             result["author"] = _str_attr(hikka_cls, "author", "unknown")
 

@@ -83,7 +83,7 @@ func (m *apiProtModule) OnLoad(k interface{}) error {
 	cfg := defaultAPIConfig()
 	err := kern.DB.GetJSON(dbKeyAPIProtConfig, &cfg)
 	if err != nil && err != sql.ErrNoRows {
-		kern.Log.Warn("api_protection: could not load config: " + err.Error())
+		kern.Log.Warn("api_protection: could not load config: %v", err)
 	}
 	m.cfg = cfg
 

@@ -442,66 +442,87 @@ def uninstall(func=None, **kwargs):
 # ModuleConfig classes
 # ============================================================
 class ConfigValue:
-    def __init__(self, key, default, description="", validator=None):
+    """Hikka-compatible ConfigValue. Stores metadata and the current value."""
+    def __init__(self, key, default, description="", validator=None, on_change=None, **kwargs):
         self.key = key
         self.default = default
         self.description = description
         self.validator = validator
+        self.on_change = on_change
+        # .value is the current value (starts at default)
+        self.value = default
 
 
-class ModuleConfig:
+class ModuleConfig(dict):
+    """Hikka-compatible ModuleConfig.
+
+    Inherits from dict so that ``dict.__setitem__(self.config, k, v)`` works.
+    - ``self[key]``      → actual current value  (stored in dict parent)
+    - ``self._config``   → {key: ConfigValue}    (metadata objects)
+    """
+
     def __init__(self, *config_values):
-        self._values = {}
+        super().__init__()
+        # _config stores ConfigValue objects (Hikka accesses this directly)
+        object.__setattr__(self, '_config', {})
         for cv in config_values:
-            if hasattr(cv, 'key'):
-                self._values[cv.key] = cv.default
+            if hasattr(cv, 'key') and cv.key is not None:
+                self._config[cv.key] = cv
+                # Store actual value in dict parent
+                dict.__setitem__(self, cv.key, cv.default)
             elif isinstance(cv, tuple) and len(cv) >= 2:
-                self._values[cv[0]] = cv[1]
+                dict.__setitem__(self, cv[0], cv[1])
 
-    def get(self, key, default=None):
-        return self._values.get(key, default)
+    # ── value access ────────────────────────────────────────────────────────
 
     def __getitem__(self, key):
-        return self._values[key]
+        try:
+            return dict.__getitem__(self, key)
+        except KeyError:
+            return None
 
     def __setitem__(self, key, value):
-        self._values[key] = value
+        dict.__setitem__(self, key, value)
+        # Keep ConfigValue.value in sync
+        cv = self._config.get(key)
+        if cv is not None:
+            cv.value = value
+
+    def get(self, key, default=None):
+        try:
+            v = dict.__getitem__(self, key)
+            return v if v is not None else default
+        except KeyError:
+            return default
+
+    def set_no_raise(self, key, value):
+        """Set a config value without raising ValidationError (Hikka compat)."""
+        self[key] = value
+
+    # ── attribute access (e.g. self.config.provider) ────────────────────────
 
     def __getattr__(self, key):
         if key.startswith('_'):
             raise AttributeError(key)
         try:
-            return self._values[key]
+            return dict.__getitem__(self, key)
         except KeyError:
-            raise AttributeError(f"ModuleConfig has no attribute {key!r}")
+            return None
 
-    def __iter__(self):
-        return iter(self._values)
+    def __setattr__(self, key, value):
+        if key.startswith('_'):
+            object.__setattr__(self, key, value)
+        else:
+            self[key] = value
 
-    def __contains__(self, key):
-        return key in self._values
-
-    def __len__(self):
-        return len(self._values)
+    # ── helpers ─────────────────────────────────────────────────────────────
 
     def from_dict(self, d):
-        self._values.update(d)
+        for k, v in d.items():
+            self[k] = v
 
     def to_dict(self):
-        return dict(self._values)
-
-    def items(self):
-        return self._values.items()
-
-    def keys(self):
-        return self._values.keys()
-
-    def values(self):
-        return self._values.values()
-
-    def update(self, mapping):
-        for key, value in mapping.items():
-            self._values[key] = value
+        return dict(self)
 
 
 class ValidationError(Exception):
@@ -2234,11 +2255,11 @@ _hikka_loader_mod.callback_handler = _hikka_callback_handler
 _hikka_loader_mod.tds = _hikka_tds
 _hikka_loader_mod.tag = _hikka_tag
 _hikka_loader_mod.on = _hikka_on
-# Config stubs (full implementation lives in hikka_compat/config.py on MCUB-fork;
-# here we provide lightweight stubs so attribute lookups don't crash).
-_hikka_loader_mod.ConfigValue = _make_stub_class("ConfigValue")
-_hikka_loader_mod.ModuleConfig = _make_stub_class("ModuleConfig")
+# Use real ConfigValue/ModuleConfig implementations so validator args work.
+_hikka_loader_mod.ConfigValue = ConfigValue
+_hikka_loader_mod.ModuleConfig = ModuleConfig
 _hikka_loader_mod.Library = _make_stub_class("Library")
+# validators assigned below after _hikka_validators_mod is defined
 # ── KEY FIX: `from hikka.loader import loader` expects hikka.loader to have a
 #    `.loader` attribute that IS the namespace with Module/command/etc.
 #    We point it back at the module itself so the pattern works:
@@ -2281,6 +2302,64 @@ _hikka_utils_mod.answer = lambda *a, **kw: None
 _hikka_utils_mod.get_link = lambda e: ""
 _hikka_utils_mod.get_display_name = lambda e: getattr(e, "first_name", "") or str(e)
 
+# ─── hikka.inline and hikka.inline.types ──────────────────────────────────────
+
+class InlineCall:
+    """Stub for Hikka InlineCall passed to inline callback handlers."""
+    def __init__(self, *args, **kwargs):
+        self.data = kwargs.get("data", "")
+        self.id = kwargs.get("id", "")
+        self.query = kwargs.get("query", None)
+    async def answer(self, text="", show_alert=False, *args, **kwargs): pass
+    async def edit(self, *args, **kwargs): pass
+    async def delete(self, *args, **kwargs): pass
+    async def unload(self, *args, **kwargs): pass
+
+_hikka_inline_pkg = types.ModuleType("hikka.inline")
+_hikka_inline_pkg.__path__ = []
+_hikka_inline_pkg.__package__ = "hikka"
+_hikka_inline_pkg.__spec__ = None
+
+_hikka_inline_types_mod = types.ModuleType("hikka.inline.types")
+_hikka_inline_types_mod.__package__ = "hikka.inline"
+_hikka_inline_types_mod.InlineCall = InlineCall
+_hikka_inline_types_mod.InlineMessage = _make_stub_class("InlineMessage")
+_hikka_inline_types_mod.BotInlineMessage = _make_stub_class("BotInlineMessage")
+_hikka_inline_types_mod.InlineQuery = _make_stub_class("InlineQuery")
+_hikka_inline_types_mod.InlineUnit = _make_stub_class("InlineUnit")
+
+_hikka_inline_pkg.types = _hikka_inline_types_mod
+
+# ─── loader.validators namespace ─────────────────────────────────────────────
+
+_hikka_validators_mod = types.ModuleType("hikka.loader.validators")
+_hikka_validators_mod.Integer = Integer
+_hikka_validators_mod.String = String
+_hikka_validators_mod.Float = Float
+_hikka_validators_mod.Choice = Choice
+_hikka_validators_mod.Boolean = Boolean
+_hikka_validators_mod.Hidden = Hidden
+_hikka_validators_mod.Secret = Secret
+_hikka_validators_mod.URL = URL
+_hikka_validators_mod.Regex = Regex
+_hikka_validators_mod.RegExp = RegExp
+_hikka_validators_mod.JSON = JSON
+_hikka_validators_mod.Color = Color
+_hikka_validators_mod.Emoji = Emoji
+_hikka_validators_mod.MultiChoice = MultiChoice
+_hikka_validators_mod.Link = Link
+_hikka_validators_mod.TelegramID = TelegramID
+_hikka_validators_mod.EntityLike = EntityLike
+_hikka_validators_mod.Union = Union
+_hikka_validators_mod.NoneType = NoneType
+_hikka_validators_mod.DictType = DictType
+_hikka_validators_mod.List = List
+_hikka_validators_mod.ValidationError = ValidationError
+_hikka_validators_mod.Placeholders = Placeholders
+
+# Wire validators into loader now that the module is fully built
+_hikka_loader_mod.validators = _hikka_validators_mod
+
 # ─── Heroku userbot compat ────────────────────────────────────────────────────
 
 _heroku_pkg = types.ModuleType("Heroku")
@@ -2296,6 +2375,8 @@ for _hname, _hmod in [
     ("hikka.loader", _hikka_loader_mod),
     ("hikka.types", _hikka_types_mod),
     ("hikka.utils", _hikka_utils_mod),
+    ("hikka.inline", _hikka_inline_pkg),
+    ("hikka.inline.types", _hikka_inline_types_mod),
     ("loader", _hikka_loader_mod),
     ("Heroku", _heroku_pkg),
     ("Heroku.loader", _hikka_loader_mod),
@@ -2311,6 +2392,7 @@ for _hname, _hmod in [
 sys.modules["hikka"].loader = _hikka_loader_mod
 sys.modules["hikka"].types = _hikka_types_mod
 sys.modules["hikka"].utils = _hikka_utils_mod
+sys.modules["hikka"].inline = _hikka_inline_pkg
 
 # Also wire .loader on the bare `loader` module so that:
 #   import loader; loader.loader.Module   and
