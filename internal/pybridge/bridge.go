@@ -466,12 +466,29 @@ def _mcub_load_module(file_path, mod_name):
     _framework = "hikka" if _is_hikka_module(_src_code) else "mcub"
 
     # Execute the .py file into a fresh namespace
-    spec = importlib.util.spec_from_file_location(mod_name, file_path)
+    # Ensure hikka.modules package exists so relative imports (from .. import loader)
+    # work for both Hikka and MCUB-style modules.
+    _pkg_name = "hikka.modules"
+    if _pkg_name not in sys.modules:
+        import types as _types
+        _pkg = _types.ModuleType(_pkg_name)
+        _pkg.__path__ = []
+        _pkg.__package__ = "hikka"
+        sys.modules[_pkg_name] = _pkg
+        _hikka = sys.modules.get("hikka")
+        if _hikka is not None:
+            _hikka.modules = _pkg
+
+    # Use a dotted name so Python knows the parent package.
+    _full_mod_name = f"hikka.modules.{mod_name}"
+
+    spec = importlib.util.spec_from_file_location(_full_mod_name, file_path)
     if spec is None:
         raise ImportError(f"Cannot create spec for {file_path!r}")
     mod = importlib.util.module_from_spec(spec)
-    mod.__name__ = mod_name
-    sys.modules[mod_name] = mod
+    mod.__name__ = _full_mod_name
+    mod.__package__ = _pkg_name
+    sys.modules[_full_mod_name] = mod
     spec.loader.exec_module(mod)
 
     # --- Detect module style ---

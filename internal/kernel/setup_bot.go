@@ -230,6 +230,11 @@ func (k *Kernel) StartInlineBot(ctx context.Context, token string) error {
 		_ = cancel
 		err := botClient.Run(runCtx, func(ctx context.Context) error {
 			if authErr := botClient.AuthenticateAsBot(ctx, token); authErr != nil {
+				errStr := authErr.Error()
+				if strings.Contains(errStr, "FLOOD_WAIT") {
+					k.Log.Warn("Inline bot FLOOD_WAIT — bot will retry on next startup. %v", authErr)
+					return nil // don't crash, continue without bot
+				}
 				k.Log.Error("Inline bot auth failed: %v", authErr)
 				return authErr
 			}
