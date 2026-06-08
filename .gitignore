@@ -1,0 +1,10 @@
+config.json
+*.session
+*.session-journal
+inline_bot_session*
+mcub.db
+mcub.db-shm
+mcub.db-wal
+mcub
+modules/__pycache__/
+modules_loaded/__pycache__/
