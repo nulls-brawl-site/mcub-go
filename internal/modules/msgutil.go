@@ -47,6 +47,36 @@ func editHTML(ctx context.Context, k *kernel.Kernel, peerID int64, msgID int, ht
 	return err
 }
 
+// editHTMLWithBanner edits a message with an attached web-page banner (URL preview).
+// If bannerURL is empty, falls back to plain editHTML.
+// invert=true places the preview above the text (matches Python invert_media=True).
+func editHTMLWithBanner(ctx context.Context, k *kernel.Kernel, peerID int64, msgID int, html string, bannerURL string, invert bool) error {
+	if k == nil || k.Client == nil {
+		return nil
+	}
+	if bannerURL == "" {
+		return editHTML(ctx, k, peerID, msgID, html)
+	}
+	plain, entities, _ := mcubclient.ParseText(html, "html")
+	if plain == "" {
+		plain = html
+	}
+	peer := peerIDToInputPeer(peerID)
+	req := &tg.MessagesEditMessageRequest{
+		Peer:        peer,
+		ID:          msgID,
+		Message:     plain,
+		Entities:    entities,
+		InvertMedia: invert,
+		Media: &tg.InputMediaWebPage{
+			URL:      bannerURL,
+			Optional: true,
+		},
+	}
+	_, err := k.Client.API().MessagesEditMessage(ctx, req)
+	return err
+}
+
 // sendHTML sends a new HTML-formatted message to the given peer.
 func sendHTML(ctx context.Context, k *kernel.Kernel, peerID int64, html string) error {
 	if k == nil || k.Client == nil {

@@ -179,8 +179,10 @@ func (m *updatesModule) cmdUpdate(ctx context.Context, ev *events.NewMessage) er
 	face := randomFace()
 	// langpack update_success: '<tg-emoji ...>⚗️</tg-emoji> <b>Update successful!</b> {emoji}\n\nRestarting in 2 seconds...'
 	successMsg := sf(m.k, "updates", "update_success", map[string]interface{}{"emoji": face})
-	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, successMsg); err != nil {
-		return err
+	// Banner: img/update.png — matches Python updates.py InputMediaWebPage(invert_media=True)
+	bannerURL := "https://raw.githubusercontent.com/nulls-brawl-site/mcub-go/refs/heads/main/img/update.png"
+	if err := editHTMLWithBanner(ctx, m.k, ev.PeerID, ev.Raw.ID, successMsg, bannerURL, true); err != nil {
+		_ = editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, successMsg)
 	}
 
 	time.Sleep(2 * time.Second)

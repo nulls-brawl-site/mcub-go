@@ -147,7 +147,7 @@ func (m *testerModule) cmdPing(ctx context.Context, ev *events.NewMessage) error
 	msLabel := s(m.k, "tester", "ms")
 	uptimeLabel := s(m.k, "tester", "uptime")
 
-	// Python format (no custom_text, no banner_url):
+	// Python format:
 	// f"""<blockquote>{start_emoji} <b>{strings("ping")}:</b> {ping_time} {strings("ms")}</blockquote>
 	// <blockquote>{start_emoji} <b>{strings("uptime")}:</b> {uptime}</blockquote>"""
 	resp := fmt.Sprintf(
@@ -156,7 +156,16 @@ func (m *testerModule) cmdPing(ctx context.Context, ev *events.NewMessage) error
 		emojiPen, pingLabel, pingMs, msLabel,
 		emojiPen, uptimeLabel, uptime,
 	)
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, resp)
+	// Banner: banner_url default = .../img/ping.png (matches Python tester.py on_load config)
+	branch := m.detectBranch()
+	bannerURL := fmt.Sprintf(
+		"https://raw.githubusercontent.com/nulls-brawl-site/mcub-go/refs/heads/%s/img/ping.png",
+		branch,
+	)
+	if err := editHTMLWithBanner(ctx, m.k, ev.PeerID, ev.Raw.ID, resp, bannerURL, false); err != nil {
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, resp)
+	}
+	return nil
 }
 
 // ---------- .logs ----------

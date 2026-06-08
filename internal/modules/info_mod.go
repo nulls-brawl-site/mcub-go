@@ -352,8 +352,14 @@ func (m *infoModule) cmdInfo(ctx context.Context, ev *events.NewMessage) error {
 		infoEmojiOrange, ramUsage,
 	)
 
-	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, infoText); err != nil {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.errSeeLogsMsg())
+	// Send with banner — matches Python info_banner_url default:
+	// https://raw.githubusercontent.com/nulls-brawl-site/mcub-go/refs/heads/{branch}/img/info.jpg
+	bannerURL := fmt.Sprintf(
+		"https://raw.githubusercontent.com/nulls-brawl-site/mcub-go/refs/heads/%s/img/info.jpg",
+		branch,
+	)
+	if err := editHTMLWithBanner(ctx, m.k, ev.PeerID, ev.Raw.ID, infoText, bannerURL, false); err != nil {
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, infoText)
 	}
 	return nil
 }
