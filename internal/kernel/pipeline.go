@@ -203,16 +203,19 @@ func (k *Kernel) dispatchSingleCommand(ctx context.Context, ev *events.NewMessag
 	text := ev.Text()
 	prefix := k.Prefix()
 
-	k.Log.Debug("dispatchSingleCommand: text=%q outgoing=%v senderID=%d adminID=%d prefix=%q",
-		text, ev.IsOutgoing, ev.SenderID, k.AdminID, prefix)
+	k.Log.Debug("dispatchSingleCommand: text=%q outgoing=%v senderID=%d peerID=%d adminID=%d prefix=%q",
+		text, ev.IsOutgoing, ev.SenderID, ev.PeerID, k.AdminID, prefix)
 
-	// Only process outgoing messages (sent by the authenticated account).
-	if !ev.IsOutgoing {
-		// Also accept messages from self in case IsOutgoing is not set
-		// (some Telegram clients / DC configs don't set the Out flag).
-		if k.AdminID == 0 || ev.SenderID != k.AdminID {
-			return nil
-		}
+	// Accept only messages from the owner:
+	// 1. IsOutgoing=true (standard outgoing flag)
+	// 2. SenderID == AdminID (explicit sender match)
+	// 3. SenderID==0 && PeerID==AdminID → Saved Messages (self-chat):
+	//    Telegram omits Out=true and FromID for messages in Saved Messages.
+	isSelf := ev.IsOutgoing ||
+		(k.AdminID != 0 && ev.SenderID == k.AdminID) ||
+		(ev.SenderID == 0 && k.AdminID != 0 && ev.PeerID == k.AdminID)
+	if !isSelf {
+		return nil
 	}
 
 	if !strings.HasPrefix(text, prefix) {
