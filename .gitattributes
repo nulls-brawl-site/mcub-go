@@ -1,0 +1,8 @@
+# Tell GitHub this is a Go project
+* linguist-detectable=false
+*.go linguist-detectable=true
+*.go linguist-language=Go
+
+# Python files are vendored/bridge code, not the main language
+internal/pybridge/*.py linguist-vendored=true
+modules/*.py linguist-vendored=true
