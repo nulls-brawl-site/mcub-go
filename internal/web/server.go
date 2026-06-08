@@ -102,13 +102,22 @@ func (s *Server) registerRoutes() {
 		handler http.HandlerFunc
 	}{
 		{"/api/status", s.handleStatus},
+		{"/api/info", s.handleInfo},
 		{"/api/modules", s.handleModules},
 		{"/api/modules/load", s.handleLoadModule},
 		{"/api/modules/unload", s.handleUnloadModule},
-		{"/api/config", s.handleConfig},
+		{"/api/modules/reload", s.handleReloadModule},
+		{"/api/modules/system", s.handleSystemModules},
+		{"/api/modules/user", s.handleUserModules},
+		{"/api/config", s.handleGetConfig},
 		{"/api/log", s.handleLog},
 		{"/api/restart", s.handleRestart},
 		{"/api/command", s.handleCommand},
+		{"/api/aliases", s.handleAliasesRouter},
+		{"/api/aliases/", s.handleAliasesRouter},
+		{"/api/repos", s.handleReposRouter},
+		{"/api/repos/", s.handleReposRouter},
+		{"/ws/log", s.handleLogWS},
 	}
 
 	for _, p := range protected {

@@ -26,7 +26,7 @@ type KernelForUnload interface {
 	CommandsOwnedBy(moduleName string) []string
 
 	// Alias management.
-	RemoveAlias(alias string)
+	RemoveAlias(alias string) error
 	AliasesForModule(moduleName string) []string
 
 	// Paths.

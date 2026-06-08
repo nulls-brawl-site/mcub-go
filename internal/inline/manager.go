@@ -227,6 +227,14 @@ func (m *Manager) MakeCallbackButton(text string, handler CallbackHandler, ttl i
 	return MakeCallbackButton(text, token, style, 0)
 }
 
+// IsRunning returns true when the inline bot is active and running.
+func (m *Manager) IsRunning() bool {
+	m.mu.RLock()
+	bot := m.bot
+	m.mu.RUnlock()
+	return bot != nil && bot.IsRunning()
+}
+
 // Cleanup removes expired callback entries from the registry.
 func (m *Manager) Cleanup() int {
 	m.mu.RLock()

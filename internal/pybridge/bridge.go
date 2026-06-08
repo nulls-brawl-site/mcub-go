@@ -426,6 +426,17 @@ import sys
 import asyncio
 import json
 
+
+def _is_hikka_module(code):
+    """Detect whether source code is a Hikka or Heroku userbot module."""
+    patterns = [
+        'from hikka', 'import hikka', '@loader.command',
+        'loader.Module', 'from .. import loader',
+        'from Heroku', 'import Heroku', 'Heroku.register_command',
+    ]
+    return any(p in code for p in patterns)
+
+
 def _mcub_load_module(file_path, mod_name):
     """Load a .py module, instantiate it, register commands, return JSON info."""
     import importlib.util
@@ -440,6 +451,17 @@ def _mcub_load_module(file_path, mod_name):
     _RegisterProxy = mcub_compat._RegisterProxy
     _module_instances = mcub_compat._module_instances
     _command_handlers = mcub_compat._command_handlers
+    # _HikkaModule is the base class for Hikka modules; skip it like ModuleBase
+    _HikkaModule = getattr(mcub_compat, '_HikkaModule', None)
+
+    # Read source for framework detection (best-effort)
+    _src_code = ""
+    try:
+        with open(file_path, "r", encoding="utf-8") as _f:
+            _src_code = _f.read()
+    except Exception:
+        pass
+    _framework = "hikka" if _is_hikka_module(_src_code) else "mcub"
 
     # Execute the .py file into a fresh namespace
     spec = importlib.util.spec_from_file_location(mod_name, file_path)
@@ -452,7 +474,7 @@ def _mcub_load_module(file_path, mod_name):
 
     # --- Detect module style ---
 
-    # Style 1: class-based (ModuleBase subclass)
+    # Style 1: class-based (ModuleBase subclass, including _HikkaModule subclasses)
     found_class = None
     for attr_name in dir(mod):
         try:
@@ -460,7 +482,8 @@ def _mcub_load_module(file_path, mod_name):
         except Exception:
             continue
         if (isinstance(attr, type) and issubclass(attr, ModuleBase)
-                and attr is not ModuleBase):
+                and attr is not ModuleBase
+                and (_HikkaModule is None or attr is not _HikkaModule)):
             found_class = attr
             break
 
@@ -499,7 +522,7 @@ def _mcub_load_module(file_path, mod_name):
             "author": getattr(found_class, "author", "unknown"),
             "description": getattr(found_class, "description", {}),
             "commands": cmds,
-            "style": "class",
+            "style": _framework if _framework == "hikka" else "class",
         }, ensure_ascii=False)
 
     # Style 2: function-based (def register(kernel))

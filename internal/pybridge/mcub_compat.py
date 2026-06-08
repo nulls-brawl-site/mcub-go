@@ -1906,4 +1906,318 @@ sys.modules["core_inline.lib"].manager = sys.modules["core_inline.lib.manager"]
 # Also expose telethon.types as alias for telethon.tl.types
 sys.modules["telethon"].types = sys.modules["telethon.types"]
 
+# ============================================================
+# Hikka/Heroku Module Compatibility Layer
+# ============================================================
+
+class _HikkaDB:
+    """Hikka database proxy - translates Hikka DB API to MCUB DB calls.
+
+    Hikka modules call:
+        self.db.get(module_name, key, default)
+        self.db.set(module_name, key, value)
+    """
+
+    def get(self, module, key, default=None):
+        val = _mcub_go.db_get(str(module), str(key))
+        return val if val is not None else default
+
+    def set(self, module, key, value):
+        _mcub_go.db_set(str(module), str(key), str(value))
+
+    def delete(self, module, key):
+        _mcub_go.db_delete(str(module), str(key))
+
+    def pointer(self, module, key, default=None, item_type=None):
+        return _DBPointer(module, key, default)
+
+    def __bool__(self):
+        return True
+
+
+class _DBPointer:
+    """Hikka DB pointer - callable getter/setter."""
+
+    def __init__(self, module, key, default=None):
+        self._module = str(module)
+        self._key = str(key)
+        self._default = default
+
+    def __call__(self, *args):
+        if args:
+            _mcub_go.db_set(self._module, self._key, str(args[0]))
+            return args[0]
+        val = _mcub_go.db_get(self._module, self._key)
+        return val if val is not None else self._default
+
+    def __repr__(self):
+        return f"<_DBPointer {self._module}.{self._key}>"
+
+
+class _HikkaModule(ModuleBase):
+    """Base class for Hikka-compatible modules.
+
+    Hikka modules inherit from ``loader.Module`` which maps to this class.
+    Key differences from MCUB ModuleBase:
+    - Constructor takes no arguments (Hikka: ``def __init__(self)``)
+    - Commands decorated with ``@loader.command`` (sets ``is_command = True``)
+    - ``self.db.get()/set()`` for DB access
+    - ``self.strings["key"]`` for i18n (flat or nested locale dict)
+    """
+
+    strings = {"name": "HikkaModule"}
+
+    def __init_subclass__(cls, **kwargs):
+        # ModuleBase.__init_subclass__ runs first and populates _cmd_registry
+        # for any _mcub_command-decorated methods.
+        super().__init_subclass__(**kwargs)
+        # Now additionally scan for Hikka-style @loader.command decorators
+        # which set __hikka_command__ = True and/or is_command = True.
+        for attr_name in list(cls.__dict__):
+            attr = cls.__dict__.get(attr_name)
+            if attr is None or not callable(attr):
+                continue
+            is_hikka_cmd = (
+                getattr(attr, "__hikka_command__", False) or
+                getattr(attr, "is_command", False)
+            )
+            if not is_hikka_cmd:
+                continue
+            # Derive command name from the method name
+            cmd_name = getattr(attr, "_mcub_cmd_name", None)
+            if cmd_name is None:
+                if attr_name.endswith("cmd"):
+                    cmd_name = attr_name[:-3]
+                elif attr_name.endswith("Cmd"):
+                    cmd_name = attr_name[:-3].lower()
+                else:
+                    cmd_name = attr_name.lower()
+            # Mark with MCUB attributes for downstream processing
+            attr._mcub_command = True
+            attr._mcub_cmd_name = cmd_name
+            attr._mcub_doc_en = (
+                getattr(attr, "__doc__", "") or
+                getattr(attr, "en_doc", "") or ""
+            )
+            attr._mcub_doc_ru = (
+                getattr(attr, "__doc_ru__", "") or
+                getattr(attr, "ru_doc", "") or ""
+            )
+            # Add to registry only if not already present
+            if not any(p == cmd_name for (p, _, _) in cls._cmd_registry):
+                cls._cmd_registry.append((cmd_name, attr, {
+                    "doc_en": attr._mcub_doc_en,
+                    "doc_ru": attr._mcub_doc_ru,
+                }))
+
+    def __init__(self, kernel=None, client=None, register=None):
+        super().__init__(kernel, client, register)
+        # Set up Hikka-style db proxy
+        self.db = _HikkaDB()
+        self._db = self.db
+        # Override strings with a version that also handles nested locale dicts
+        raw_str = None
+        for klass in type(self).__mro__:
+            if "strings" in klass.__dict__:
+                val = klass.__dict__["strings"]
+                if isinstance(val, dict):
+                    raw_str = val
+                    break
+                elif isinstance(val, property):
+                    break
+        object.__setattr__(
+            self, "_strings_obj", _SimpleStrings(raw_str or {})
+        )
+
+    async def client_ready(self, client=None, db=None):
+        """Called when module is loaded – Hikka compatibility hook."""
+        pass
+
+    async def on_load(self):
+        """Called on module load; also invokes client_ready for Hikka modules."""
+        try:
+            await self.client_ready(self.client, self.db)
+        except Exception:
+            pass
+
+
+# ─── @loader.command and sibling decorators ──────────────────────────────────
+
+def _hikka_command(*args, **kwargs):
+    """``@loader.command`` decorator – Hikka style."""
+    def decorator(func):
+        func.__hikka_command__ = True
+        func.is_command = True
+        func.__command_kwargs__ = dict(kwargs)
+        if "ru_doc" in kwargs:
+            func.__doc_ru__ = kwargs["ru_doc"]
+        if "en_doc" in kwargs and not getattr(func, "__doc__", None):
+            func.__doc__ = kwargs["en_doc"]
+        if "alias" in kwargs:
+            func.alias = kwargs["alias"]
+        if "aliases" in kwargs:
+            func.aliases = kwargs["aliases"]
+        for k, v in kwargs.items():
+            try:
+                setattr(func, k, v)
+            except (AttributeError, TypeError):
+                pass
+        return func
+    if args and callable(args[0]):
+        return decorator(args[0])
+    return decorator
+
+
+def _hikka_watcher(*args, **kwargs):
+    """``@loader.watcher`` decorator – Hikka style."""
+    positional_tags = []
+    if args and not callable(args[0]):
+        positional_tags = list(args)
+        args = ()
+
+    def decorator(func):
+        func.__hikka_watcher__ = True
+        func.is_watcher = True
+        func._mcub_watcher = True
+        merged = dict(kwargs)
+        for t in positional_tags:
+            if isinstance(t, str):
+                merged.setdefault(t, True)
+        func.__watcher_tags__ = tuple(t for t in positional_tags if isinstance(t, str))
+        func.__watcher_kwargs__ = merged
+        for k, v in merged.items():
+            try:
+                setattr(func, k, v)
+            except (AttributeError, TypeError):
+                pass
+        return func
+
+    if args and callable(args[0]):
+        return decorator(args[0])
+    return decorator
+
+
+def _hikka_inline_handler(*args, **kwargs):
+    """``@loader.inline_handler`` decorator."""
+    def decorator(func):
+        func.__hikka_inline_handler__ = True
+        func.is_inline_handler = True
+        return func
+    if args and callable(args[0]):
+        return decorator(args[0])
+    return decorator
+
+
+def _hikka_callback_handler(*args, **kwargs):
+    """``@loader.callback_handler`` decorator."""
+    def decorator(func):
+        func.__hikka_callback_handler__ = True
+        func.is_callback_handler = True
+        return func
+    if args and callable(args[0]):
+        return decorator(args[0])
+    return decorator
+
+
+def _hikka_tds(cls_or_func):
+    """``@loader.tds`` – marks class/function for translation (passthrough)."""
+    if isinstance(cls_or_func, type):
+        cls_or_func.__hikka_module__ = True
+    return cls_or_func
+
+
+def _hikka_tag(*tags, **kwarg_tags):
+    """``@loader.tag`` – attaches tags to a watcher."""
+    def inner(func):
+        for t in tags:
+            setattr(func, t, True)
+        for t, v in kwarg_tags.items():
+            setattr(func, t, v)
+        return func
+    return inner
+
+
+def _hikka_on(event_type):
+    """``@loader.on`` – raw event handler decorator."""
+    def decorator(func):
+        func.__hikka_on_event__ = event_type
+        return func
+    return decorator
+
+
+# ─── Fake hikka.loader module ─────────────────────────────────────────────────
+
+_hikka_loader_mod = types.ModuleType("loader")
+_hikka_loader_mod.__package__ = "hikka"
+_hikka_loader_mod.Module = _HikkaModule
+_hikka_loader_mod.ModuleBase = _HikkaModule       # alias used by some modules
+_hikka_loader_mod.command = _hikka_command
+_hikka_loader_mod.watcher = _hikka_watcher
+_hikka_loader_mod.inline_handler = _hikka_inline_handler
+_hikka_loader_mod.callback_handler = _hikka_callback_handler
+_hikka_loader_mod.tds = _hikka_tds
+_hikka_loader_mod.tag = _hikka_tag
+_hikka_loader_mod.on = _hikka_on
+# Config stubs (full implementation lives in hikka_compat/config.py on MCUB-fork;
+# here we provide lightweight stubs so attribute lookups don't crash).
+_hikka_loader_mod.ConfigValue = _make_stub_class("ConfigValue")
+_hikka_loader_mod.ModuleConfig = _make_stub_class("ModuleConfig")
+_hikka_loader_mod.Library = _make_stub_class("Library")
+
+# ─── Fake hikka.* package stubs ───────────────────────────────────────────────
+
+_hikka_pkg = types.ModuleType("hikka")
+_hikka_pkg.__path__ = []
+_hikka_pkg.__spec__ = None
+_hikka_pkg.loader = _hikka_loader_mod
+
+_hikka_types_mod = types.ModuleType("hikka.types")
+_hikka_types_mod.ConfigValue = _make_stub_class("ConfigValue")
+_hikka_types_mod.ModuleConfig = _make_stub_class("ModuleConfig")
+
+_hikka_utils_mod = types.ModuleType("hikka.utils")
+
+
+def _hku_get_args(message):
+    text = getattr(message, "text", "") or ""
+    parts = text.split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+_hikka_utils_mod.get_args = _hku_get_args
+_hikka_utils_mod.get_args_raw = _hku_get_args
+_hikka_utils_mod.escape_html = (
+    lambda t: str(t)
+    .replace("&", "&amp;")
+    .replace("<", "&lt;")
+    .replace(">", "&gt;")
+)
+_hikka_utils_mod.get_chat_id = lambda m: getattr(m, "chat_id", 0)
+
+# ─── Heroku userbot compat ────────────────────────────────────────────────────
+
+_heroku_pkg = types.ModuleType("Heroku")
+_heroku_pkg.__path__ = []
+
+# ─── Register all Hikka/Heroku stubs in sys.modules ──────────────────────────
+
+for _hname, _hmod in [
+    ("hikka", _hikka_pkg),
+    ("hikka.loader", _hikka_loader_mod),
+    ("hikka.types", _hikka_types_mod),
+    ("hikka.utils", _hikka_utils_mod),
+    ("loader", _hikka_loader_mod),
+    ("Heroku", _heroku_pkg),
+    ("heroku", _heroku_pkg),
+]:
+    if _hname not in sys.modules or isinstance(
+        sys.modules[_hname], _MagicStubModule
+    ):
+        sys.modules[_hname] = _hmod
+
+# Ensure hikka sub-modules are accessible as package attributes
+sys.modules["hikka"].loader = _hikka_loader_mod
+sys.modules["hikka"].types = _hikka_types_mod
+sys.modules["hikka"].utils = _hikka_utils_mod
+
 print("[mcub_compat] Python compatibility layer loaded", flush=True)

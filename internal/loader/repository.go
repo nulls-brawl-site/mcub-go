@@ -227,6 +227,22 @@ func (r *RepositoryManager) AddRepo(ctx context.Context, rawURL string) error {
 	return nil
 }
 
+// AddRepoURL adds a repository by URL with only SSRF validation (no network
+// reachability check). Suitable for programmatic use from the kernel.
+func (r *RepositoryManager) AddRepoURL(rawURL string) error {
+	if err := validateURL(rawURL); err != nil {
+		return fmt.Errorf("repository URL rejected: %w", err)
+	}
+	normalized := strings.TrimRight(rawURL, "/")
+	for _, existing := range r.repos {
+		if strings.TrimRight(existing.URL, "/") == normalized {
+			return fmt.Errorf("repository already exists: %q", rawURL)
+		}
+	}
+	r.repos = append(r.repos, Repository{URL: normalized, Name: normalized})
+	return nil
+}
+
 // RemoveRepo removes a repository by 0-based index.
 func (r *RepositoryManager) RemoveRepo(index int) error {
 	if index < 0 || index >= len(r.repos) {

@@ -1,9 +1,15 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
+
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -56,6 +62,66 @@ type KernelAPI interface {
 	RecentLog(n int) []string
 	Restart() error
 	DispatchCommand(cmd string) (string, error)
+	// Extended API
+	GetAliases() map[string]string
+	AddAlias(alias, target string) error
+	RemoveAlias(alias string) error
+	GetRepos() []string
+	AddRepo(url string) error
+	RemoveRepo(index int) error
+	GetConfig() interface{}
+	UpdateConfig(updates map[string]interface{}) error
+	GetAdminID() int64
+	GetLanguage() string
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-interfaces for optional kernel capabilities (used by new handlers so
+// they work even when the kernel does not satisfy the full KernelAPI).
+// ─────────────────────────────────────────────────────────────────────────────
+
+type kernelInfoer interface {
+	Status() string
+	Uptime() time.Duration
+	GetAdminID() int64
+	GetLanguage() string
+}
+
+type kernelModuleLister interface {
+	ListModules() []string
+}
+
+type kernelSystemModuler interface {
+	ListSystemModules() []string
+}
+
+type kernelUserModuler interface {
+	ListUserModules() []string
+}
+
+type kernelModuleReloader interface {
+	ReloadModule(name string) error
+}
+
+type kernelConfiger interface {
+	GetConfig() interface{}
+	UpdateConfig(updates map[string]interface{}) error
+}
+
+type kernelAliaser interface {
+	GetAliases() map[string]string
+	AddAlias(alias, target string) error
+	RemoveAlias(alias string) error
+}
+
+type kernelReporer interface {
+	GetRepos() []string
+	AddRepo(url string) error
+	RemoveRepo(index int) error
+}
+
+type kernelLogger interface {
+	RecentLog(n int) []string
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,4 +328,330 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	token := bearerToken(r)
 	writeOK(w, map[string]bool{"authenticated": s.auth.Validate(token)})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extended handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// handleInfo — GET /api/info
+func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	info := map[string]interface{}{
+		"status":   "running",
+		"uptime":   0,
+		"admin_id": int64(0),
+		"language": "en",
+	}
+	if ki, ok := s.kernel.(kernelInfoer); ok {
+		info["status"] = ki.Status()
+		info["uptime"] = ki.Uptime().Seconds()
+		info["admin_id"] = ki.GetAdminID()
+		info["language"] = ki.GetLanguage()
+	}
+	writeOK(w, info)
+}
+
+// handleSystemModules — GET /api/modules/system
+func (s *Server) handleSystemModules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if km, ok := s.kernel.(kernelSystemModuler); ok {
+		writeOK(w, km.ListSystemModules())
+		return
+	}
+	writeOK(w, []string{})
+}
+
+// handleUserModules — GET /api/modules/user
+func (s *Server) handleUserModules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if km, ok := s.kernel.(kernelUserModuler); ok {
+		writeOK(w, km.ListUserModules())
+		return
+	}
+	writeOK(w, []string{})
+}
+
+// handleReloadModule — POST /api/modules/reload
+func (s *Server) handleReloadModule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	km, ok := s.kernel.(kernelModuleReloader)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "kernel does not support module reload")
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if err := km.ReloadModule(body.Name); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, map[string]string{"reloaded": body.Name})
+}
+
+// handleGetConfig — GET /api/config (masked)
+func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if kc, ok := s.kernel.(kernelConfiger); ok {
+		writeOK(w, kc.GetConfig())
+		return
+	}
+	// Fall back to old interface.
+	if ka, ok := s.kernel.(KernelAPI); ok {
+		writeOK(w, ka.GetAllConfig())
+		return
+	}
+	writeOK(w, map[string]interface{}{})
+}
+
+// handleUpdateConfig — PATCH /api/config
+func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	kc, ok := s.kernel.(kernelConfiger)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "kernel does not support config update")
+		return
+	}
+	var updates map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := kc.UpdateConfig(updates); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, map[string]bool{"updated": true})
+}
+
+// handleGetAliases — GET /api/aliases
+func (s *Server) handleGetAliases(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if ka, ok := s.kernel.(kernelAliaser); ok {
+		writeOK(w, ka.GetAliases())
+		return
+	}
+	writeOK(w, map[string]string{})
+}
+
+// handleAddAlias — POST /api/aliases
+func (s *Server) handleAddAlias(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	ka, ok := s.kernel.(kernelAliaser)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "kernel does not support aliases")
+		return
+	}
+	var body struct {
+		Alias  string `json:"alias"`
+		Target string `json:"target"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Alias == "" || body.Target == "" {
+		writeError(w, http.StatusBadRequest, "alias and target are required")
+		return
+	}
+	if err := ka.AddAlias(body.Alias, body.Target); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, map[string]string{"alias": body.Alias, "target": body.Target})
+}
+
+// handleDeleteAlias — DELETE /api/aliases/:alias
+func (s *Server) handleDeleteAlias(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	ka, ok := s.kernel.(kernelAliaser)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "kernel does not support aliases")
+		return
+	}
+	// Extract alias name from the URL path: /api/aliases/<alias>
+	alias := strings.TrimPrefix(r.URL.Path, "/api/aliases/")
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		writeError(w, http.StatusBadRequest, "alias name is required in path")
+		return
+	}
+	if err := ka.RemoveAlias(alias); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, map[string]string{"deleted": alias})
+}
+
+// handleGetRepos — GET /api/repos
+func (s *Server) handleGetRepos(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if kr, ok := s.kernel.(kernelReporer); ok {
+		writeOK(w, kr.GetRepos())
+		return
+	}
+	writeOK(w, []string{})
+}
+
+// handleAddRepo — POST /api/repos
+func (s *Server) handleAddRepo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	kr, ok := s.kernel.(kernelReporer)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "kernel does not support repos")
+		return
+	}
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.URL == "" {
+		writeError(w, http.StatusBadRequest, "url is required")
+		return
+	}
+	if err := kr.AddRepo(body.URL); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, map[string]string{"added": body.URL})
+}
+
+// handleDeleteRepo — DELETE /api/repos/:id
+func (s *Server) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	kr, ok := s.kernel.(kernelReporer)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "kernel does not support repos")
+		return
+	}
+	// Extract index from the URL path: /api/repos/<id>
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/repos/")
+	idStr = strings.TrimSpace(idStr)
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid repo id")
+		return
+	}
+	if err := kr.RemoveRepo(id); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, map[string]int{"deleted": id})
+}
+
+// handleAliasesRouter dispatches alias CRUD requests.
+func (s *Server) handleAliasesRouter(w http.ResponseWriter, r *http.Request) {
+	// /api/aliases        GET → list, POST → add
+	// /api/aliases/<name> DELETE → remove
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	isRoot := path == "/api/aliases"
+	switch {
+	case r.Method == http.MethodGet && isRoot:
+		s.handleGetAliases(w, r)
+	case r.Method == http.MethodPost && isRoot:
+		s.handleAddAlias(w, r)
+	case r.Method == http.MethodDelete && !isRoot:
+		s.handleDeleteAlias(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleReposRouter dispatches repo CRUD requests.
+func (s *Server) handleReposRouter(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	isRoot := path == "/api/repos"
+	switch {
+	case r.Method == http.MethodGet && isRoot:
+		s.handleGetRepos(w, r)
+	case r.Method == http.MethodPost && isRoot:
+		s.handleAddRepo(w, r)
+	case r.Method == http.MethodDelete && !isRoot:
+		s.handleDeleteRepo(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleLogWS — WebSocket /ws/log — streams log lines in real time.
+func (s *Server) handleLogWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true, // allow any origin for the panel
+	})
+	if err != nil {
+		return
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "done")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	kl, ok := s.kernel.(kernelLogger)
+	if !ok {
+		// No log source — send empty marker and close.
+		_ = wsjson.Write(ctx, conn, []string{})
+		return
+	}
+
+	// Send the recent 100 log lines immediately.
+	lines := kl.RecentLog(100)
+	if err := wsjson.Write(ctx, conn, lines); err != nil {
+		return
+	}
+
+	// Poll for new log lines every second until the client disconnects.
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	last := len(lines)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			all := kl.RecentLog(500)
+			if len(all) > last {
+				newLines := all[last:]
+				last = len(all)
+				if err := wsjson.Write(ctx, conn, newLines); err != nil {
+					return
+				}
+			}
+		}
+	}
 }

@@ -50,25 +50,35 @@ func (k *Kernel) resolveAlias(cmd string, depth int) (string, error) {
 	return k.resolveAlias(target, depth-1)
 }
 
-// AddAlias registers a new alias mapping from -> to.
-// Aliases are persisted in the Config on the next Save.
-func (k *Kernel) AddAlias(from, to string) {
+// AddAlias registers a new alias mapping from -> to and persists the config.
+func (k *Kernel) AddAlias(from, to string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.Aliases[from] = to
 	if k.Config != nil {
+		if k.Config.Aliases == nil {
+			k.Config.Aliases = make(map[string]string)
+		}
 		k.Config.Aliases[from] = to
+		if k.ConfigFile != "" {
+			return k.Config.Save(k.ConfigFile)
+		}
 	}
+	return nil
 }
 
-// RemoveAlias removes the alias for the given command word.
-func (k *Kernel) RemoveAlias(alias string) {
+// RemoveAlias removes the alias for the given command word and persists the config.
+func (k *Kernel) RemoveAlias(alias string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	delete(k.Aliases, alias)
 	if k.Config != nil {
 		delete(k.Config.Aliases, alias)
+		if k.ConfigFile != "" {
+			return k.Config.Save(k.ConfigFile)
+		}
 	}
+	return nil
 }
 
 // ListCommands returns a snapshot of all registered command names.

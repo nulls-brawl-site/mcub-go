@@ -125,6 +125,14 @@ func (r *Registry) Source(name string) (ModuleSource, bool) {
 	return s, ok
 }
 
+// Has returns true if a module with the given name is registered.
+func (r *Registry) Has(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.modules[name]
+	return ok
+}
+
 // Names returns the sorted list of registered module names.
 func (r *Registry) Names() []string {
 	r.mu.RLock()

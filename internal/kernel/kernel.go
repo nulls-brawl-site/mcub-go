@@ -3,6 +3,8 @@
 package kernel
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -118,6 +120,12 @@ type Kernel struct {
 	// --- Inline subsystem ---
 	// InlineManager coordinates the inline bot and its handler registry.
 	InlineManager *inline.Manager
+
+	// --- Repository manager ---
+	RepoManager *loader.RepositoryManager
+
+	// --- Loading phase: "system", "user", "full" ---
+	loadPhase string
 }
 
 // New creates a new Kernel with sane defaults.
@@ -153,6 +161,7 @@ func New(cfg *config.Config, configFile string, kType KernelType) *Kernel {
 	k.Scheduler = scheduler.New(log)
 	k.Permissions = permissions.New()
 	k.InlineManager = inline.NewManager(k)
+	k.RepoManager = loader.NewRepositoryManager()
 	return k
 }
 
@@ -330,4 +339,171 @@ func (k *Kernel) GetModulesDir() string {
 // GetModulesLoadedDir returns the path to the loaded-modules directory.
 func (k *Kernel) GetModulesLoadedDir() string {
 	return k.ModulesLoadedDir
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KernelAPI helpers (web panel + admin queries)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GetAliases returns a snapshot of the current command aliases map.
+func (k *Kernel) GetAliases() map[string]string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	if k.Config == nil {
+		return nil
+	}
+	out := make(map[string]string, len(k.Config.Aliases))
+	for a, t := range k.Config.Aliases {
+		out[a] = t
+	}
+	return out
+}
+
+// GetLanguage returns the configured language, defaulting to "en".
+func (k *Kernel) GetLanguage() string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	if k.Config != nil && k.Config.Language != "" {
+		return k.Config.Language
+	}
+	return "en"
+}
+
+// GetAdminID returns the configured admin user ID.
+func (k *Kernel) GetAdminID() int64 {
+	return k.AdminID
+}
+
+// GetRepos returns the list of repository URLs managed by the RepoManager.
+func (k *Kernel) GetRepos() []string {
+	if k.RepoManager == nil {
+		return nil
+	}
+	repos := k.RepoManager.ListRepos()
+	urls := make([]string, len(repos))
+	for i, r := range repos {
+		urls[i] = r.URL
+	}
+	return urls
+}
+
+// AddRepo adds a repository URL via the RepoManager (performs SSRF validation
+// and verifies the repo is reachable).
+func (k *Kernel) AddRepo(url string) error {
+	if k.RepoManager == nil {
+		k.RepoManager = loader.NewRepositoryManager()
+	}
+	return k.RepoManager.AddRepoURL(url)
+}
+
+// RemoveRepo removes the repository at the given 0-based index.
+func (k *Kernel) RemoveRepo(index int) error {
+	if k.RepoManager == nil {
+		return fmt.Errorf("no repository manager")
+	}
+	return k.RepoManager.RemoveRepo(index)
+}
+
+// GetConfig returns a masked copy of the current config (secrets replaced with
+// "***"). The returned value can be safely serialised to JSON.
+func (k *Kernel) GetConfig() interface{} {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	if k.Config == nil {
+		return nil
+	}
+	m := k.Config.ToMap()
+	// Mask sensitive fields.
+	for _, field := range []string{"api_hash", "phone", "proxy", "inline_bot_token", "web_panel_token"} {
+		if v, ok := m[field]; ok && v != nil && v != "" {
+			m[field] = "***"
+		}
+	}
+	return m
+}
+
+// UpdateConfig merges updates into the current config and saves it to disk.
+func (k *Kernel) UpdateConfig(updates map[string]interface{}) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.Config == nil {
+		return fmt.Errorf("config not initialised")
+	}
+	k.Config.Merge(updates)
+	if k.ConfigFile != "" {
+		return k.Config.Save(k.ConfigFile)
+	}
+	return nil
+}
+
+// ShouldProcessCommandEvent returns true when the event should be dispatched
+// as a command (outgoing messages always qualify; incoming only from admin).
+func (k *Kernel) ShouldProcessCommandEvent(senderID int64, isOutgoing bool) bool {
+	if isOutgoing {
+		return true
+	}
+	return k.AdminID != 0 && senderID == k.AdminID
+}
+
+// IsAdmin returns true when userID equals the configured admin ID.
+func (k *Kernel) IsAdmin(userID int64) bool {
+	return k.AdminID != 0 && userID == k.AdminID
+}
+
+// IsBotAvailable returns true when the inline bot client is ready.
+func (k *Kernel) IsBotAvailable() bool {
+	return k.InlineManager != nil && k.InlineManager.IsRunning()
+}
+
+// GetModuleMetadata parses module metadata comments from Python source code.
+// It looks for lines like `# version: X.Y.Z`, `# author: @name`,
+// `# description: …` as well as a `class …Module` name attribute.
+func (k *Kernel) GetModuleMetadata(code string) map[string]interface{} {
+	result := map[string]interface{}{
+		"version":     "1.0.0",
+		"author":      "unknown",
+		"description": "",
+		"commands":    map[string]string{},
+	}
+	for _, line := range strings.Split(code, "\n") {
+		stripped := strings.TrimSpace(line)
+		if !strings.HasPrefix(stripped, "#") {
+			continue
+		}
+		content := strings.TrimSpace(strings.TrimPrefix(stripped, "#"))
+		if strings.HasPrefix(content, "version:") {
+			result["version"] = strings.TrimSpace(strings.TrimPrefix(content, "version:"))
+		} else if strings.HasPrefix(content, "author:") {
+			result["author"] = strings.TrimSpace(strings.TrimPrefix(content, "author:"))
+		} else if strings.HasPrefix(content, "description:") {
+			result["description"] = strings.TrimSpace(strings.TrimPrefix(content, "description:"))
+		}
+	}
+	return result
+}
+
+// SetPowerSaveMode enables or disables power-save mode in the config.
+func (k *Kernel) SetPowerSaveMode(enabled bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.Config != nil {
+		k.Config.PowerSaveMode = enabled
+	}
+}
+
+// GetLoadKernelStatus returns the current loading phase: "system", "user", or "full".
+func (k *Kernel) GetLoadKernelStatus() string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	if k.loadPhase == "" {
+		return "full"
+	}
+	return k.loadPhase
+}
+
+// SetLoadPhase sets the kernel loading phase (used during Init).
+func (k *Kernel) SetLoadPhase(phase string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.loadPhase = phase
 }

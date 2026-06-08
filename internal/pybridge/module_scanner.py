@@ -233,7 +233,7 @@ def scan_module(module_obj):
     # ---- 1. Class-based module (ModuleBase subclass) --------------------
     module_class = _find_module_base_subclass(module_obj)
     if module_class is not None:
-        # Detect "loader" style: module imports `loader` as module alias
+        # Detect "loader" / "hikka" style: module imports `loader` as module alias
         loader_mod = module_dict.get("loader")
         if (isinstance(loader_mod, types.ModuleType) and
                 getattr(loader_mod, "ModuleBase", None) is not None):
@@ -241,21 +241,55 @@ def scan_module(module_obj):
         else:
             result["style"] = "class"
 
+        # Also check if the class inherits from a Hikka-style Module base
+        hikka_cls, hikka_cmds = _find_hikka_module(module_obj)
+        if hikka_cls is module_class and hikka_cmds:
+            result["style"] = "hikka"
+
         result["name"] = _str_attr(module_class, "name", module_class.__name__)
         result["version"] = _str_attr(module_class, "version", "1.0.0")
         result["author"] = _str_attr(module_class, "author", "unknown")
+        # For Hikka modules, the name may be in strings["name"] or strings["en"]["name"]
+        raw_strings = getattr(module_class, "strings", {}) or {}
+        if isinstance(raw_strings, dict):
+            hikka_name = raw_strings.get("name")
+            if hikka_name is None and isinstance(raw_strings.get("en"), dict):
+                hikka_name = raw_strings["en"].get("name")
+            if hikka_name:
+                result["name"] = str(hikka_name)
         desc = getattr(module_class, "description", {})
         result["description"] = desc if isinstance(desc, dict) else {"en": str(desc)}
 
         for method_name in _safe_dir(module_class):
             try:
                 method = getattr(module_class, method_name)
-                if callable(method) and getattr(method, "_mcub_command", False):
+                if callable(method) and (
+                    getattr(method, "_mcub_command", False) or
+                    getattr(method, "__hikka_command__", False) or
+                    getattr(method, "is_command", False)
+                ):
                     entry = _cmd_entry(method, method_name, module_class.__name__)
                     entry["style"] = result["style"]
-                    result["commands"].append(entry)
+                    if not _already_registered(result["commands"], entry["name"], module_class.__name__):
+                        result["commands"].append(entry)
             except Exception:
                 pass
+
+    # ---- 1b. Hikka-only detection (no ModuleBase in MRO, pure loader.Module) ----
+    if not result["commands"] and module_class is None:
+        hikka_cls, hikka_cmds = _find_hikka_module(module_obj)
+        if hikka_cls is not None:
+            result["style"] = "hikka"
+            result["commands"] = hikka_cmds
+            raw_strings = getattr(hikka_cls, "strings", {}) or {}
+            if isinstance(raw_strings, dict):
+                hikka_name = raw_strings.get("name")
+                if hikka_name is None and isinstance(raw_strings.get("en"), dict):
+                    hikka_name = raw_strings["en"].get("name")
+                if hikka_name:
+                    result["name"] = str(hikka_name)
+            result["version"] = _str_attr(hikka_cls, "version", "1.0.0")
+            result["author"] = _str_attr(hikka_cls, "author", "unknown")
 
     # ---- 2. Module-level functions with @command ------------------------
     for attr_name, attr in module_dict.items():
@@ -298,6 +332,88 @@ def scan_module_json(module_obj):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _find_hikka_module(namespace):
+    """Find a Hikka-style Module class in a module namespace.
+
+    Recognises classes that:
+    - Inherit from ``loader.Module`` / ``_HikkaModule`` (MRO contains "Module"
+      or "_HikkaModule"), AND
+    - Have at least one method decorated with ``@loader.command`` (i.e.
+      ``is_command=True`` or ``__hikka_command__=True``).
+
+    Returns:
+        (class_obj, list_of_cmd_dicts) or (None, []) if nothing found.
+    """
+    if isinstance(namespace, dict):
+        items = list(namespace.items())
+    else:
+        items = []
+        for attr_name in _safe_dir(namespace):
+            try:
+                items.append((attr_name, getattr(namespace, attr_name)))
+            except Exception:
+                pass
+
+    for class_name, obj in items:
+        if not isinstance(obj, type):
+            continue
+        mro_names = [c.__name__ for c in getattr(obj, "__mro__", [])]
+        # Accept classes that inherit from loader.Module or _HikkaModule
+        if not any(n in mro_names for n in ("Module", "_HikkaModule")):
+            continue
+        # Skip the base classes themselves
+        if obj.__name__ in ("Module", "_HikkaModule", "ModuleBase"):
+            continue
+
+        cmds = []
+        for attr_name in _safe_dir(obj):
+            try:
+                attr = getattr(obj, attr_name, None)
+                if not callable(attr):
+                    continue
+                if not (
+                    getattr(attr, "_hikka_command", False) or
+                    getattr(attr, "__hikka_command__", False) or
+                    getattr(attr, "is_command", False) or
+                    getattr(attr, "_mcub_command", False)
+                ):
+                    continue
+                # Derive the command trigger name
+                cmd_name = getattr(attr, "_mcub_cmd_name", None)
+                if cmd_name is None:
+                    if attr_name.endswith("cmd"):
+                        cmd_name = attr_name[:-3]
+                    elif attr_name.endswith("Cmd"):
+                        cmd_name = attr_name[:-3].lower()
+                    else:
+                        cmd_name = attr_name.lower()
+                doc_en = (
+                    getattr(attr, "_mcub_doc_en", None) or
+                    getattr(attr, "en_doc", None) or
+                    getattr(attr, "__doc__", None) or ""
+                )
+                doc_ru = (
+                    getattr(attr, "_mcub_doc_ru", None) or
+                    getattr(attr, "ru_doc", None) or
+                    getattr(attr, "__doc_ru__", None) or ""
+                )
+                cmds.append({
+                    "name": cmd_name,
+                    "doc_en": str(doc_en),
+                    "doc_ru": str(doc_ru),
+                    "method": attr_name,
+                    "class": class_name,
+                    "style": "hikka",
+                })
+            except Exception:
+                pass
+
+        if cmds:
+            return obj, cmds
+
+    return None, []
+
 
 def _find_module_base_subclass(module_obj):
     """Return the first ModuleBase subclass found at module level, or None.

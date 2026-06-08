@@ -1,0 +1,22 @@
+{
+    "api_id": 0,
+    "api_hash": "",
+    "phone": "",
+    "command_prefix": ".",
+    "aliases": {},
+    "power_save_mode": false,
+    "2fa_enabled": false,
+    "healthcheck_interval": 0,
+    "developer_chat_id": null,
+    "language": "",
+    "theme": "",
+    "proxy": null,
+    "inline_bot_token": null,
+    "inline_bot_username": null,
+    "db_version": 0,
+    "web_panel_token": null,
+    "piped": false,
+    "memory_guard": false,
+    "web_panel_enabled": false,
+    "log_bot_enabled": false
+}
