@@ -113,7 +113,15 @@ func main() {
 	}
 	k.Log = log
 
-	// ---- Load system modules ----------------------------------------------
+	// ---- Init kernel (opens DB, Python bridge) ───────────────────────────
+	// We use Go built-in modules, so skip Python system module loading.
+	k.SkipPythonSystemModules = true
+	if err := k.Init(); err != nil {
+		log.Error("Kernel init failed: %v", err)
+		os.Exit(1)
+	}
+
+	// ---- Load Go system modules (DB is now open) ─────────────────────────
 	for _, m := range modules.AllSystemModules() {
 		if err := k.Loader.LoadBuiltin(m); err != nil {
 			log.Warn("Failed to load system module %s: %v", m.Name(), err)
@@ -151,12 +159,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// ---- Init and run kernel ----------------------------------------------
-	if err := k.Init(); err != nil {
-		log.Error("Kernel init failed: %v", err)
-		os.Exit(1)
-	}
-
+	// ---- Run kernel -------------------------------------------------------
 	if err := k.Run(ctx); err != nil && err != context.Canceled {
 		log.Error("Kernel exited with error: %v", err)
 		os.Exit(1)

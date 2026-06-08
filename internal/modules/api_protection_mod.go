@@ -103,11 +103,13 @@ func (m *apiProtModule) OnLoad(k interface{}) error {
 		return fmt.Errorf("api_protection: expected *kernel.Kernel, got %T", k)
 	}
 	m.k = kern
-	// Load config from DB.
+	// Load config from DB (only if DB is ready).
 	cfg := defaultAPIConfig()
-	err := kern.DB.GetJSON(dbKeyAPIProtConfig, &cfg)
-	if err != nil && err != sql.ErrNoRows {
-		kern.Log.Warn("api_protection: could not load config: %v", err)
+	if kern.DB != nil {
+		err := kern.DB.GetJSON(dbKeyAPIProtConfig, &cfg)
+		if err != nil && err != sql.ErrNoRows {
+			kern.Log.Warn("api_protection: could not load config: %v", err)
+		}
 	}
 	m.cfg = cfg
 

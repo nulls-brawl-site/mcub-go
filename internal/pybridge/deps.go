@@ -86,15 +86,31 @@ func ParseRequires(src string) []string {
 	seen := map[string]bool{}
 	var result []string
 
+	// reValidPkg matches a valid pip package name (PEP 508 simplified).
+	// Must start with a letter or digit, may contain letters/digits/.-_[]
+	reValidPkg := regexp.MustCompile(`^[A-Za-z0-9]`)
+
 	add := func(pkg string) {
 		pkg = strings.TrimSpace(pkg)
 		if pkg == "" || pkg == "requires:" {
 			return
 		}
-		// strip version specifiers to get the importable name
+		// Reject comment-like tokens: # author: @user etc.
+		if strings.HasPrefix(pkg, "#") || strings.HasPrefix(pkg, "@") {
+			return
+		}
+		// Reject tokens that look like metadata keys (contain : but no version spec)
 		bare := reVersionSpec.ReplaceAllString(pkg, "")
 		bare = strings.TrimSpace(bare)
 		if bare == "" {
+			return
+		}
+		// Must look like a valid package name
+		if !reValidPkg.MatchString(bare) {
+			return
+		}
+		// Reject if it ends with : (metadata key like "author:")
+		if strings.HasSuffix(bare, ":") {
 			return
 		}
 		if !seen[bare] {

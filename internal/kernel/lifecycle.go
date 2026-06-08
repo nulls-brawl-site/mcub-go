@@ -104,10 +104,13 @@ func (k *Kernel) Init() error {
 		k.PyBridge = bridge
 	}
 
-	// 5. Load system modules from modules/ directory.
-	// Uses the KernelZen-aware wrapper which recovers panics for zen kernels.
-	if err := k.LoadSystemModules(k.ModulesDir); err != nil {
-		k.Log.Warn("System module load error: %v", err)
+	// 5. Load system modules.
+	// When SkipPythonSystemModules is set (Go built-ins are used), skip the
+	// Python system modules in modules/ to avoid duplicate-name conflicts.
+	if !k.SkipPythonSystemModules {
+		if err := k.LoadSystemModules(k.ModulesDir); err != nil {
+			k.Log.Warn("System module load error: %v", err)
+		}
 	}
 
 	// 6. Load user modules from modules_loaded/ directory.
@@ -137,10 +140,30 @@ func (k *Kernel) Run(ctx context.Context) error {
 			k.Log.Info("Connected to Telegram (uptime timer started)")
 			k.StartTime = time.Now()
 
-			// Optionally log self.
+			// ── Auth flow ──────────────────────────────────────────────────
+			// If the session is not yet authorised, run the interactive flow:
+			// send code to phone → prompt user for the code on stdin → sign in.
+			phone := ""
+			if k.Config != nil {
+				phone = k.Config.Phone
+			}
+			if err := k.Client.AuthenticateAsUser(ctx, mcubclient.AuthOptions{
+				Phone: phone,
+			}); err != nil {
+				return fmt.Errorf("auth: %w", err)
+			}
+
+			// Fetch self after successful auth.
 			if self, err := k.Client.Self(ctx); err == nil {
 				k.Log.Info("Authenticated as user ID %d", self.ID)
 				k.AdminID = int64(self.ID)
+			}
+
+			// ── Inline bot setup ─────────────────────────────────────────
+			// If inline_bot_token is missing, run interactive wizard
+			// (auto-create via BotFather or manual token entry).
+			if err := k.SetupInlineBotIfNeeded(ctx); err != nil {
+				k.Log.Warn("Inline bot setup failed: %v", err)
 			}
 
 			// Block until context is done or shutdown is requested.

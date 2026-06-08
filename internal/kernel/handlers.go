@@ -42,6 +42,8 @@ type CommandInfo struct {
 // OnNewMessage is the entry-point handler wired to the Telegram client.
 // It runs all kernel-level middlewares before dispatching to ProcessCommand.
 func (k *Kernel) OnNewMessage(ctx context.Context, ev *events.NewMessage) error {
+	k.Log.Debug("OnNewMessage: text=%q outgoing=%v senderID=%d", ev.Text(), ev.IsOutgoing, ev.SenderID)
+
 	// Build the final handler (ProcessCommand) wrapped in middleware.
 	final := events.Handler(func(ctx context.Context, e events.Event) error {
 		nm, ok := e.(*events.NewMessage)

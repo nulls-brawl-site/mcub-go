@@ -61,6 +61,10 @@ type Kernel struct {
 	StartTime time.Time
 	Type      KernelType
 
+	// SkipPythonSystemModules prevents Init() from loading Python system modules
+	// from ModulesDir when Go built-in modules are used instead.
+	SkipPythonSystemModules bool
+
 	// --- Config ---
 	Config     *config.Config
 	ConfigFile string

@@ -203,6 +203,18 @@ func (k *Kernel) dispatchSingleCommand(ctx context.Context, ev *events.NewMessag
 	text := ev.Text()
 	prefix := k.Prefix()
 
+	k.Log.Debug("dispatchSingleCommand: text=%q outgoing=%v senderID=%d adminID=%d prefix=%q",
+		text, ev.IsOutgoing, ev.SenderID, k.AdminID, prefix)
+
+	// Only process outgoing messages (sent by the authenticated account).
+	if !ev.IsOutgoing {
+		// Also accept messages from self in case IsOutgoing is not set
+		// (some Telegram clients / DC configs don't set the Out flag).
+		if k.AdminID == 0 || ev.SenderID != k.AdminID {
+			return nil
+		}
+	}
+
 	if !strings.HasPrefix(text, prefix) {
 		return nil // not a command
 	}
