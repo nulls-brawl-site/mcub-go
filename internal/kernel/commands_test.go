@@ -19,7 +19,10 @@ func makeTestKernel() *kernel.Kernel {
 }
 
 func makeEvent(text string) *events.NewMessage {
-	return &events.NewMessage{Raw: &tg.Message{Message: text}}
+	return &events.NewMessage{
+		Raw:        &tg.Message{Message: text},
+		IsOutgoing: true, // simulate owner's outgoing message
+	}
 }
 
 // ---------------------------------------------------------------------------
