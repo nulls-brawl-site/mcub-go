@@ -89,38 +89,45 @@ func (k *Kernel) autoCreateBot(ctx context.Context) (string, error) {
 	}
 
 	fmt.Println("\n[BotFather] Resolving @BotFather...")
-	// Resolve @BotFather user ID
-	bfUser, err := k.Client.GetEntity(ctx, "BotFather")
+	// Resolve @BotFather — need UserID + AccessHash for PEER_ID_INVALID fix
+	bfEntity, err := k.Client.GetEntity(ctx, "BotFather")
 	if err != nil {
 		return "", fmt.Errorf("resolve BotFather: %w", err)
 	}
-	bfID := int64(0)
-	if u, ok := bfUser.(*tg.User); ok {
-		bfID = int64(u.ID)
-	}
-	if bfID == 0 {
-		return "", fmt.Errorf("could not get BotFather ID")
+	bfUser, ok := bfEntity.(*tg.User)
+	if !ok || bfUser.ID == 0 {
+		return "", fmt.Errorf("could not get BotFather user")
 	}
 
-	sendMsg := func(text string) error {
-		_, err := k.Client.SendMessage(ctx, mcubclient.SendMessageParams{
-			PeerID: bfID,
-			Text:   text,
+	// Build InputPeerUser with proper AccessHash — avoids PEER_ID_INVALID
+	bfPeer := &tg.InputPeerUser{
+		UserID:     bfUser.ID,
+		AccessHash: bfUser.AccessHash,
+	}
+	_ = bfPeer
+
+	api := k.Client.API()
+	sendRaw := func(text string) error {
+		rnd := time.Now().UnixNano()
+		_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer:     bfPeer,
+			Message:  text,
+			RandomID: rnd,
 		})
 		return err
 	}
 
 	fmt.Println("[BotFather] Sending /newbot ...")
-	if err := sendMsg("/newbot"); err != nil {
+	if err := sendRaw("/newbot"); err != nil {
 		return "", fmt.Errorf("send /newbot: %w", err)
 	}
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(2 * time.Second)
 
 	fmt.Println("[BotFather] Sending bot name: MCUB Inline Bot")
-	if err := sendMsg("MCUB Inline Bot"); err != nil {
+	if err := sendRaw("MCUB Inline Bot"); err != nil {
 		return "", fmt.Errorf("send bot name: %w", err)
 	}
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(2 * time.Second)
 
 	fmt.Print("[BotFather] Enter desired bot username (must end with _bot): ")
 	username := strings.TrimSpace(readLine())
@@ -132,11 +139,11 @@ func (k *Kernel) autoCreateBot(ctx context.Context) (string, error) {
 	}
 
 	fmt.Printf("[BotFather] Sending username: %s\n", username)
-	if err := sendMsg(username); err != nil {
+	if err := sendRaw(username); err != nil {
 		return "", fmt.Errorf("send username: %w", err)
 	}
 
-	// Wait up to 30s for token in BotFather reply
+	// Wait up to 30s for BotFather reply with token
 	fmt.Println("[BotFather] Waiting for token...")
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -147,12 +154,30 @@ func (k *Kernel) autoCreateBot(ctx context.Context) (string, error) {
 		}
 		time.Sleep(2 * time.Second)
 
-		msgs, err := k.Client.GetHistory(ctx, bfID, mcubclient.HistoryParams{Limit: 5})
+		res, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:  bfPeer,
+			Limit: 5,
+		})
 		if err != nil {
 			continue
 		}
-		for _, msg := range msgs {
-			if tok := reBotToken.FindString(msg.Message); tok != "" {
+		var msgs []string
+		switch v := res.(type) {
+		case *tg.MessagesMessages:
+			for _, m := range v.Messages {
+				if msg, ok := m.(*tg.Message); ok {
+					msgs = append(msgs, msg.Message)
+				}
+			}
+		case *tg.MessagesMessagesSlice:
+			for _, m := range v.Messages {
+				if msg, ok := m.(*tg.Message); ok {
+					msgs = append(msgs, msg.Message)
+				}
+			}
+		}
+		for _, text := range msgs {
+			if tok := reBotToken.FindString(text); tok != "" {
 				fmt.Printf("[BotFather] Token received: %s...\n", tok[:10])
 				return tok, nil
 			}
