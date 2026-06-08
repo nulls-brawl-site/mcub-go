@@ -22,5 +22,6 @@ func AllSystemModules() []loader.Module {
 		newLogBotModule(),    // log_setup, log_entries
 		newBackupModule(),    // backup, restore, restore_with
 		newPipedModule(),     // echo, grep, head, tail, sort, uniq, wc, calc, sed, strip, b64, jq, sleep, delete
+		newCommandModule(),   // botsetup, setlang
 	}
 }

@@ -2,10 +2,13 @@ package modules
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
+	"strings"
 
 	"github.com/gotd/td/tg"
 	"github.com/nulls-brawl-site/mcub-go/internal/kernel"
+	"github.com/nulls-brawl-site/mcub-go/internal/langpacks"
 	mcubclient "github.com/nulls-brawl-site/telegram-mcub-go/client"
 	mcubtypes "github.com/nulls-brawl-site/telegram-mcub-go/types"
 )
@@ -133,4 +136,24 @@ func newURLButton(text, url string) *mcubtypes.Button {
 		Text: text,
 		URL:  url,
 	}
+}
+
+// s gets a plain string from the langpacks for the kernel's current language.
+func s(k *kernel.Kernel, module, key string) string {
+	if k == nil {
+		return key
+	}
+	return langpacks.Default.Get(k.GetLanguage(), module, key)
+}
+
+// sf gets a langpack string with {placeholder} substitution from data.
+func sf(k *kernel.Kernel, module, key string, data map[string]interface{}) string {
+	if k == nil {
+		return key
+	}
+	val := langpacks.Default.Get(k.GetLanguage(), module, key)
+	for placeholder, v := range data {
+		val = strings.ReplaceAll(val, "{"+placeholder+"}", fmt.Sprintf("%v", v))
+	}
+	return val
 }

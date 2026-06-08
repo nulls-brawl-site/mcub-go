@@ -220,6 +220,16 @@ func (m *Manager) Get(locale, module, key string, args ...interface{}) string {
 	return key
 }
 
+// Format retrieves a string and replaces {placeholder} tokens with values from data.
+// Unmatched placeholders are left as-is.
+func (m *Manager) Format(locale, module, key string, data map[string]interface{}) string {
+	val := m.Get(locale, module, key)
+	for k, v := range data {
+		val = strings.ReplaceAll(val, "{"+k+"}", fmt.Sprintf("%v", v))
+	}
+	return val
+}
+
 // fallbackChain builds the locale resolution order.
 // Caller must hold m.mu (read lock).
 func (m *Manager) fallbackChain(locale string) []string {
