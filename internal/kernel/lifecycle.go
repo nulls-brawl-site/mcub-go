@@ -102,6 +102,8 @@ func (k *Kernel) Init() error {
 			},
 		})
 		k.PyBridge = bridge
+		// Wire Python bridge into the Loader so .iload/.dlm can load .py modules.
+		k.Loader.NewPyLoaderFromBridge(bridge)
 	}
 
 	// 5. Load system modules.
