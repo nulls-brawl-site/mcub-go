@@ -206,7 +206,7 @@ func (k *Kernel) Restart() error {
 }
 
 // healthcheckInterval returns interval based on kernel type.
-// KernelZen is more conservative (60 s); standard uses config or 30 s.
+// KernelZen is more conservative (60 s); mini/bot/standard use config or 30 s.
 func (k *Kernel) healthcheckInterval() int {
 	if k.Type == KernelZen {
 		return 60 // zen is more conservative
@@ -214,7 +214,7 @@ func (k *Kernel) healthcheckInterval() int {
 	if k.Config != nil && k.Config.HealthcheckInterval > 0 {
 		return k.Config.HealthcheckInterval
 	}
-	return 30 // standard default
+	return 30 // standard / mini / bot default
 }
 
 // reconnectDelay returns the delay between reconnect attempts.
@@ -269,7 +269,7 @@ func (k *Kernel) LoadSystemModules(dir string) error {
 		_ = loadErr // zen does not propagate
 		return nil
 	}
-	// Standard / mini: propagate errors.
+	// Standard / mini / bot: propagate errors.
 	loaded, failed, err := sl.LoadSystemModules(dir)
 	if len(failed) > 0 {
 		k.Log.Warn("System module load failures: %v", failed)

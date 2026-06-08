@@ -11,7 +11,9 @@
 //	--port               Web panel port (default: 8080)
 //	--host               Web panel host (default: 127.0.0.1)
 //	--proxy-web          Enable web proxy at path
-//	--core               Kernel type: standard | zen (default: standard)
+//	--core               Kernel type: standard | zen | mini (default: standard)
+//	--bot-token          Run as a bot with this token (activates bot kernel)
+//	--mini               Run in mini (lightweight) mode
 //	--set-default-core   Save the selected core as default in config
 //	--clear-default-core Reset the default core in config
 //	--log-level          Log level: debug | info | warn | error (default: info)
@@ -43,7 +45,9 @@ func main() {
 		flagPort             = flag.Int("port", 8080, "web panel port")
 		flagHost             = flag.String("host", "127.0.0.1", "web panel host")
 		flagProxyWeb         = flag.String("proxy-web", "", "enable web proxy at path")
-		flagCore             = flag.String("core", "standard", "kernel type: standard|zen")
+		flagCore             = flag.String("core", "standard", "kernel type: standard|zen|mini")
+		flagBotToken         = flag.String("bot-token", "", "run as bot with this token (activates bot kernel)")
+		flagMini             = flag.Bool("mini", false, "run in mini (lightweight) mode")
 		flagSetDefaultCore   = flag.Bool("set-default-core", false, "save selected core as default")
 		flagClearDefaultCore = flag.Bool("clear-default-core", false, "clear default core from config")
 		flagLogLevel         = flag.String("log-level", "info", "log level: debug|info|warn|error")
@@ -91,19 +95,23 @@ func main() {
 		return
 	}
 
-	// ---- Kernel type ------------------------------------------------------
-	var kType kernel.KernelType
-	switch *flagCore {
-	case "zen":
-		kType = kernel.KernelZen
-	default:
-		kType = kernel.KernelStandard
-	}
-
 	// ---- Build kernel -----------------------------------------------------
-	k := kernel.New(cfg, *flagConfig, kType)
+	var k *kernel.Kernel
+	switch {
+	case *flagBotToken != "":
+		k = kernel.NewBotKernel(cfg, *flagConfig, *flagBotToken)
+		log.Info("MCUB-Go %s starting (kernel: bot)", version.GetVersion())
+	case *flagMini || *flagCore == "mini":
+		k = kernel.NewMiniKernel(cfg, *flagConfig)
+		log.Info("MCUB-Go %s starting (kernel: mini)", version.GetVersion())
+	case *flagCore == "zen":
+		k = kernel.New(cfg, *flagConfig, kernel.KernelZen)
+		log.Info("MCUB-Go %s starting (kernel: zen)", version.GetVersion())
+	default:
+		k = kernel.New(cfg, *flagConfig, kernel.KernelStandard)
+		log.Info("MCUB-Go %s starting (kernel: standard)", version.GetVersion())
+	}
 	k.Log = log
-	log.Info("MCUB-Go %s starting (kernel: %s)", version.GetVersion(), kType)
 
 	// ---- Load system modules ----------------------------------------------
 	for _, m := range modules.AllSystemModules() {
@@ -113,7 +121,9 @@ func main() {
 	}
 
 	// ---- Web panel --------------------------------------------------------
-	if !*flagNoWeb {
+	// Mini and bot kernels skip the web panel (matches mini.py / bot.py behaviour).
+	skipWeb := *flagNoWeb || k.Type == kernel.KernelMini || k.Type == kernel.KernelBot
+	if !skipWeb {
 		webPassword := ""
 		if cfg.WebPanelToken != nil {
 			webPassword = *cfg.WebPanelToken
@@ -127,7 +137,11 @@ func main() {
 			}
 		}()
 	} else {
-		log.Info("Web panel disabled")
+		if k.Type == kernel.KernelMini || k.Type == kernel.KernelBot {
+			log.Info("Web panel skipped (kernel: %s)", k.GetKernelTag())
+		} else {
+			log.Info("Web panel disabled")
+		}
 	}
 
 	// ---- Print startup banner ---------------------------------------------

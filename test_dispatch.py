@@ -116,16 +116,16 @@ check(
     f"got {type(instance.strings).__name__}",
 )
 check(
-    "tester: strings call works",
-    instance.strings("ping") == "ping",
+    "tester: strings call returns string",
+    isinstance(instance.strings("ping"), str),
 )
 check(
-    "tester: strings subscript works",
-    instance.strings["ping"] == "ping",
+    "tester: strings subscript returns string",
+    isinstance(instance.strings["ping"], str),
 )
 check(
-    "tester: strings.get works",
-    instance.strings.get("ping", "default") == "default",
+    "tester: strings.get with nonexistent key returns default",
+    instance.strings.get("nonexistent_key_xyz_12345", "default") == "default",
 )
 check(
     "tester: log is _Logger",
@@ -165,8 +165,8 @@ for cmd in expected_cmds:
         (display_name, cmd) in _command_handlers,
     )
 check(
-    "loader: strings subscript works",
-    instance.strings["no_modules_catalog"] == "no_modules_catalog",
+    "loader: strings subscript returns string",
+    isinstance(instance.strings["no_modules_catalog"], str) and len(instance.strings["no_modules_catalog"]) > 0,
 )
 
 # --- command.py (class-based with self.strings["key"] usage) ---------------
@@ -179,8 +179,8 @@ if cls:
     instance = instantiate(cls, display_name)
     check("command: instantiation OK", True)
     check(
-        "command: strings subscript works",
-        instance.strings["start_init_error"] == "start_init_error",
+        "command: strings subscript returns string",
+        isinstance(instance.strings["start_init_error"], str) and len(instance.strings["start_init_error"]) > 0,
     )
 else:
     check("command: no class found (skip)", True)

@@ -424,9 +424,9 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]interface{}{})
 }
 
-// handleUpdateConfig — PATCH /api/config
+// handleUpdateConfig — PATCH or POST /api/config
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPatch {
+	if r.Method != http.MethodPatch && r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -575,10 +575,49 @@ func (s *Server) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]int{"deleted": id})
 }
 
+// handleLogout — POST /api/auth/logout
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	token := bearerToken(r)
+	if token != "" {
+		s.auth.Revoke(token)
+	}
+	writeOK(w, map[string]bool{"logged_out": true})
+}
+
+// handleStop — POST /api/stop  (signals kernel shutdown)
+func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeOK(w, map[string]string{"message": "stopping"})
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		if k, ok := s.kernel.(interface{ Shutdown() }); ok {
+			k.Shutdown()
+		}
+	}()
+}
+
+// handleConfigRouter — GET /api/config or PATCH /api/config
+func (s *Server) handleConfigRouter(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGetConfig(w, r)
+	case http.MethodPatch, http.MethodPost:
+		s.handleUpdateConfig(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 // handleAliasesRouter dispatches alias CRUD requests.
+// Supports DELETE on both /api/aliases/<name> and /api/aliases with body {alias: "name"}.
 func (s *Server) handleAliasesRouter(w http.ResponseWriter, r *http.Request) {
-	// /api/aliases        GET → list, POST → add
-	// /api/aliases/<name> DELETE → remove
 	path := strings.TrimSuffix(r.URL.Path, "/")
 	isRoot := path == "/api/aliases"
 	switch {
@@ -588,12 +627,32 @@ func (s *Server) handleAliasesRouter(w http.ResponseWriter, r *http.Request) {
 		s.handleAddAlias(w, r)
 	case r.Method == http.MethodDelete && !isRoot:
 		s.handleDeleteAlias(w, r)
+	case r.Method == http.MethodDelete && isRoot:
+		// DELETE with body {alias: "name"}
+		ka, ok := s.kernel.(kernelAliaser)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "kernel does not support aliases")
+			return
+		}
+		var body struct {
+			Alias string `json:"alias"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Alias == "" {
+			writeError(w, http.StatusBadRequest, "alias is required")
+			return
+		}
+		if err := ka.RemoveAlias(body.Alias); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeOK(w, map[string]string{"deleted": body.Alias})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
 // handleReposRouter dispatches repo CRUD requests.
+// Supports DELETE on both /api/repos/<id> and /api/repos with body {index: N}.
 func (s *Server) handleReposRouter(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
 	isRoot := path == "/api/repos"
@@ -604,6 +663,25 @@ func (s *Server) handleReposRouter(w http.ResponseWriter, r *http.Request) {
 		s.handleAddRepo(w, r)
 	case r.Method == http.MethodDelete && !isRoot:
 		s.handleDeleteRepo(w, r)
+	case r.Method == http.MethodDelete && isRoot:
+		// DELETE with body {index: N}
+		kr, ok := s.kernel.(kernelReporer)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "kernel does not support repos")
+			return
+		}
+		var body struct {
+			Index int `json:"index"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "index is required")
+			return
+		}
+		if err := kr.RemoveRepo(body.Index); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeOK(w, map[string]int{"deleted": body.Index})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}

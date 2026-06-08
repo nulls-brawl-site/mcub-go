@@ -46,6 +46,8 @@ type KernelType string
 const (
 	KernelStandard KernelType = "standard"
 	KernelZen      KernelType = "zen"
+	KernelMini     KernelType = "mini"
+	KernelBot      KernelType = "bot"
 )
 
 // Kernel is the central runtime object of the MCUB userbot.
@@ -126,6 +128,11 @@ type Kernel struct {
 
 	// --- Loading phase: "system", "user", "full" ---
 	loadPhase string
+
+	// --- Bot-specific fields (KernelBot only) ---
+	BotToken  string
+	BotID     int64
+	IsBotMode bool
 }
 
 // New creates a new Kernel with sane defaults.
@@ -163,6 +170,44 @@ func New(cfg *config.Config, configFile string, kType KernelType) *Kernel {
 	k.InlineManager = inline.NewManager(k)
 	k.RepoManager = loader.NewRepositoryManager()
 	return k
+}
+
+// NewMiniKernel creates a lightweight Mini kernel (port of mini.py).
+// It skips the web panel and loads only essential system modules.
+func NewMiniKernel(cfg *config.Config, configFile string) *Kernel {
+	k := New(cfg, configFile, KernelMini)
+	k.loadPhase = "mini"
+	return k
+}
+
+// NewBotKernel creates a Bot kernel (port of bot.py).
+// It uses a bot token for authentication instead of a user phone number.
+func NewBotKernel(cfg *config.Config, configFile, token string) *Kernel {
+	k := New(cfg, configFile, KernelBot)
+	k.BotToken = token
+	k.IsBotMode = true
+	return k
+}
+
+// GetKernelTag returns a short display string for the kernel type.
+// Matches the Python _kernel_tag attribute values.
+func (k *Kernel) GetKernelTag() string {
+	switch k.Type {
+	case KernelBot:
+		return "BOT"
+	case KernelMini:
+		return "MINI"
+	case KernelZen:
+		return "zen"
+	default:
+		return "standard"
+	}
+}
+
+// HealthcheckIntervalSec returns the healthcheck interval in seconds.
+// Exported wrapper around the unexported healthcheckInterval for tests.
+func (k *Kernel) HealthcheckIntervalSec() int {
+	return k.healthcheckInterval()
 }
 
 // GetAPIID returns the Telegram app ID configured for this kernel.

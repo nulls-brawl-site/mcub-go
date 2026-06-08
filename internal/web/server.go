@@ -101,6 +101,7 @@ func (s *Server) registerRoutes() {
 		pattern string
 		handler http.HandlerFunc
 	}{
+		{"/api/auth/logout", s.handleLogout},
 		{"/api/status", s.handleStatus},
 		{"/api/info", s.handleInfo},
 		{"/api/modules", s.handleModules},
@@ -109,9 +110,10 @@ func (s *Server) registerRoutes() {
 		{"/api/modules/reload", s.handleReloadModule},
 		{"/api/modules/system", s.handleSystemModules},
 		{"/api/modules/user", s.handleUserModules},
-		{"/api/config", s.handleGetConfig},
+		{"/api/config", s.handleConfigRouter},
 		{"/api/log", s.handleLog},
 		{"/api/restart", s.handleRestart},
+		{"/api/stop", s.handleStop},
 		{"/api/command", s.handleCommand},
 		{"/api/aliases", s.handleAliasesRouter},
 		{"/api/aliases/", s.handleAliasesRouter},

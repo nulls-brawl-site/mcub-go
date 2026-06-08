@@ -19,24 +19,9 @@ import (
 
 	"github.com/gotd/td/tg"
 	"github.com/nulls-brawl-site/mcub-go/internal/kernel"
+	"github.com/nulls-brawl-site/mcub-go/internal/langpacks"
 	"github.com/nulls-brawl-site/mcub-go/internal/loader"
 	"github.com/nulls-brawl-site/telegram-mcub-go/events"
-)
-
-// Custom emoji IDs for the settings module (matching Python source).
-const (
-	emojiSettingsGear    = `<tg-emoji emoji-id="5271785531192491349">⚙️</tg-emoji>`
-	emojiSettingsCheck   = `<tg-emoji emoji-id="5454096630372379732">☑️</tg-emoji>`
-	emojiSettingsError   = `<tg-emoji emoji-id="5388785832956016892">❌</tg-emoji>`
-	emojiSettingsAlias   = `<tg-emoji emoji-id="5334673106202010226">✏️</tg-emoji>`
-	emojiSettingsLang    = `<tg-emoji emoji-id="5397575638146110953">🌎</tg-emoji>`
-	emojiSettingsDanger  = `<tg-emoji emoji-id="5904692292324692386">⚠️</tg-emoji>`
-	emojiSettingsInfo    = `<tg-emoji emoji-id="5440539497383087970">ℹ️</tg-emoji>`
-	emojiSettingsMcub1   = `<tg-emoji emoji-id="5469945764069280010">🔮</tg-emoji>`
-	emojiSettingsMcub2   = `<tg-emoji emoji-id="5469943045354984820">🔮</tg-emoji>`
-	emojiSettingsMcub3   = `<tg-emoji emoji-id="5469879466954098867">🔮</tg-emoji>`
-	emojiSettingsBranch  = `<tg-emoji emoji-id="5449918202718985124">🌳</tg-emoji>`
-	emojiSettingsTelethon = `<tg-emoji emoji-id="5397575638146110953">🌎</tg-emoji>`
 )
 
 // settingsAvailableLangs is the list of supported language codes.
@@ -94,6 +79,30 @@ func (m *settingsModule) Commands() []loader.Command {
 		{Name: "piped", Description: "[on/off] toggle pipeline mode", Handler: m.cmdPiped},
 		{Name: "mcub", Description: "show MCUB version info", Handler: m.cmdMcub},
 	}
+}
+
+// ---------- langpack helpers ----------
+
+func (m *settingsModule) lang() string {
+	if m.k != nil {
+		return m.k.GetLanguage()
+	}
+	return "en"
+}
+
+// s returns a localised string from the "settings" module by key.
+func (m *settingsModule) s(key string) string {
+	return langpacks.Default.Get(m.lang(), "settings", key)
+}
+
+// sf returns a localised string with Python-style {placeholder} substitution.
+// pairs must be alternating: "{key}", "value", "{key2}", "value2", ...
+func (m *settingsModule) sf(key string, pairs ...string) string {
+	raw := langpacks.Default.Get(m.lang(), "settings", key)
+	if len(pairs) > 0 {
+		return strings.NewReplacer(pairs...).Replace(raw)
+	}
+	return raw
 }
 
 // ---------- helpers ----------
@@ -181,23 +190,19 @@ func (m *settingsModule) cmdSetPrefix(ctx context.Context, ev *events.NewMessage
 
 	if len(args) < 1 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>Usage:</b> <code>%ssetprefix [prefix] [id/@username/reply]</code>\n"+
-				"<b>Current prefix:</b> <code>%s</code>",
-				emojiSettingsGear, html.EscapeString(prefix), html.EscapeString(prefix)))
+			m.sf("prefix_usage", "{prefix}", html.EscapeString(prefix)))
 	}
 
 	newPrefix := args[0]
 	if len([]rune(newPrefix)) != 1 {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			emojiSettingsError+" Prefix must be exactly one character.")
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("prefix_one_char"))
 	}
 
 	var targetID int64
 	if len(args) > 1 {
 		id, err := m.resolvePrefixTarget(ctx, ev, args[1])
 		if err != nil {
-			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("%s Could not resolve target: %s", emojiSettingsError, html.EscapeString(err.Error())))
+			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("prefix_target_invalid"))
 		}
 		targetID = id
 	} else if ev.ReplyToMsgID != 0 {
@@ -231,13 +236,22 @@ func (m *settingsModule) cmdSetPrefix(ctx context.Context, ev *events.NewMessage
 
 	if err := m.saveConfig(); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Error saving config: %s", emojiSettingsError, html.EscapeString(err.Error())))
+			fmt.Sprintf("❌ Error saving config: %s", html.EscapeString(err.Error())))
 	}
 
+	if targetID == m.k.AdminID {
+		// Use prefix_changed for own prefix.
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+			m.sf("prefix_changed",
+				"{prefix}", html.EscapeString(newPrefix),
+				"{prefix_old}", html.EscapeString(oldPrefix)))
+	}
+	// Use prefix_owner_changed for others.
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Prefix for <code>%d</code>: <code>%s</code> → <code>%s</code>",
-			emojiSettingsCheck, targetID,
-			html.EscapeString(oldPrefix), html.EscapeString(newPrefix)))
+		m.sf("prefix_owner_changed",
+			"{owner_id}", html.EscapeString(key),
+			"{prefix_old}", html.EscapeString(oldPrefix),
+			"{prefix}", html.EscapeString(newPrefix)))
 }
 
 // ---------- .addalias ----------
@@ -248,8 +262,7 @@ func (m *settingsModule) cmdAddAlias(ctx context.Context, ev *events.NewMessage)
 
 	if !strings.Contains(raw, "=") {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>Usage:</b> <code>%saddalias alias=command</code>",
-				emojiSettingsAlias, html.EscapeString(prefix)))
+			m.sf("alias_usage", "{prefix}", html.EscapeString(prefix)))
 	}
 
 	parts := strings.SplitN(raw, "=", 2)
@@ -258,29 +271,27 @@ func (m *settingsModule) cmdAddAlias(ctx context.Context, ev *events.NewMessage)
 
 	if alias == "" || command == "" {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>Usage:</b> <code>%saddalias alias=command</code>",
-				emojiSettingsAlias, html.EscapeString(prefix)))
+			m.sf("alias_usage", "{prefix}", html.EscapeString(prefix)))
 	}
 
 	// Check command exists.
 	cmdBase := strings.Fields(command)[0]
 	if _, ok := m.k.CommandHandlers[cmdBase]; !ok {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Command <code>%s</code> not found.",
-				emojiSettingsError, html.EscapeString(cmdBase)))
+			m.sf("alias_target_not_found", "{command}", html.EscapeString(cmdBase)))
 	}
 
 	m.k.AddAlias(alias, command)
 	if err := m.saveConfig(); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Error saving config: %s", emojiSettingsError, html.EscapeString(err.Error())))
+			fmt.Sprintf("❌ Error saving config: %s", html.EscapeString(err.Error())))
 	}
 
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Alias created: <code>%s%s</code> → <code>%s%s</code>",
-			emojiSettingsCheck,
-			html.EscapeString(prefix), html.EscapeString(alias),
-			html.EscapeString(prefix), html.EscapeString(command)))
+		m.sf("alias_created",
+			"{prefix}", html.EscapeString(prefix),
+			"{alias}", html.EscapeString(alias),
+			"{command}", html.EscapeString(command)))
 }
 
 // ---------- .delalias ----------
@@ -291,33 +302,31 @@ func (m *settingsModule) cmdDelAlias(ctx context.Context, ev *events.NewMessage)
 
 	if args == "" {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>Usage:</b> <code>%sdelalias alias</code>",
-				emojiSettingsAlias, html.EscapeString(prefix)))
+			m.sf("delalias_usage", "{prefix}", html.EscapeString(prefix)))
 	}
 
 	if _, ok := m.k.Aliases[args]; !ok {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Alias <code>%s</code> not found.",
-				emojiSettingsError, html.EscapeString(args)))
+			m.sf("delalias_not_found", "{alias}", html.EscapeString(args)))
 	}
 
 	m.k.RemoveAlias(args)
 	if err := m.saveConfig(); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Error saving config: %s", emojiSettingsError, html.EscapeString(err.Error())))
+			fmt.Sprintf("❌ Error saving config: %s", html.EscapeString(err.Error())))
 	}
 
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Alias <code>%s%s</code> removed.",
-			emojiSettingsCheck, html.EscapeString(prefix), html.EscapeString(args)))
+		m.sf("delalias_done",
+			"{prefix}", html.EscapeString(prefix),
+			"{alias}", html.EscapeString(args)))
 }
 
 // ---------- .aliases ----------
 
 func (m *settingsModule) cmdAliases(ctx context.Context, ev *events.NewMessage) error {
 	if len(m.k.Aliases) == 0 {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			emojiSettingsAlias+" No aliases configured.")
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("aliases_empty"))
 	}
 
 	prefix := m.k.Prefix()
@@ -363,17 +372,17 @@ func (m *settingsModule) cmdIloadAlias(ctx context.Context, ev *events.NewMessag
 			resp, err := httpClient.Get(args)
 			if err != nil {
 				return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-					fmt.Sprintf("%s Failed to fetch URL: %s", emojiSettingsError, html.EscapeString(err.Error())))
+					m.sf("iloadalias_fetch_error", "{url}", html.EscapeString(args)))
 			}
 			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-					fmt.Sprintf("%s HTTP error: %d", emojiSettingsError, resp.StatusCode))
+					m.sf("iloadalias_fetch_error", "{url}", html.EscapeString(args)))
 			}
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
 				return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-					fmt.Sprintf("%s Error reading response: %s", emojiSettingsError, html.EscapeString(err.Error())))
+					m.sf("iloadalias_fetch_error", "{url}", html.EscapeString(args)))
 			}
 			data = string(body)
 		} else {
@@ -384,21 +393,19 @@ func (m *settingsModule) cmdIloadAlias(ctx context.Context, ev *events.NewMessag
 
 	if data == "" {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>Usage:</b> <code>%siloadalias [url]</code> or reply to a message containing JSON aliases.",
-				emojiSettingsAlias, html.EscapeString(m.k.Prefix())))
+			m.sf("iloadalias_usage", "{prefix}", html.EscapeString(m.k.Prefix())))
 	}
 
 	var parsed map[string]interface{}
 	if err := json.Unmarshal([]byte(data), &parsed); err != nil {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			emojiSettingsError+" Invalid JSON format.")
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("iloadalias_invalid_json"))
 	}
 
 	// Support {"aliases": {...}} and flat {"alias": "cmd"} formats.
 	aliasesRaw := parsed
 	if inner, ok := parsed["aliases"]; ok {
-		if m, ok := inner.(map[string]interface{}); ok {
-			aliasesRaw = m
+		if mm, ok := inner.(map[string]interface{}); ok {
+			aliasesRaw = mm
 		}
 	}
 
@@ -431,19 +438,18 @@ func (m *settingsModule) cmdIloadAlias(ctx context.Context, ev *events.NewMessag
 
 	if err := m.saveConfig(); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Error saving config: %s", emojiSettingsError, html.EscapeString(err.Error())))
+			fmt.Sprintf("❌ Error saving config: %s", html.EscapeString(err.Error())))
 	}
 
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Imported <b>%d</b> aliases.", emojiSettingsCheck, loaded))
+		m.sf("iloadalias_done", "{count}", strconv.Itoa(loaded)))
 }
 
 // ---------- .unla ----------
 
 func (m *settingsModule) cmdUnla(ctx context.Context, ev *events.NewMessage) error {
 	if len(m.k.Aliases) == 0 {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			emojiSettingsAlias+" No aliases to export.")
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("aliases_empty"))
 	}
 
 	aliasesExport := make(map[string]string)
@@ -454,22 +460,21 @@ func (m *settingsModule) cmdUnla(ctx context.Context, ev *events.NewMessage) err
 	exportData, err := json.MarshalIndent(map[string]interface{}{"aliases": aliasesExport}, "", "  ")
 	if err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Error serializing aliases: %s", emojiSettingsError, html.EscapeString(err.Error())))
+			fmt.Sprintf("❌ Error serializing aliases: %s", html.EscapeString(err.Error())))
 	}
 
-	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, emojiSettingsAlias+" Uploading aliases..."); err != nil {
+	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("unla_uploading")); err != nil {
 		return err
 	}
 
 	tmpPath := filepath.Join(os.TempDir(), "aliases.json")
 	if err := os.WriteFile(tmpPath, exportData, 0600); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Error writing temp file: %s", emojiSettingsError, html.EscapeString(err.Error())))
+			fmt.Sprintf("❌ Error writing temp file: %s", html.EscapeString(err.Error())))
 	}
 	defer os.Remove(tmpPath)
 
-	caption := fmt.Sprintf("%s <b>Aliases export</b>\nImport with: <code>%siloadalias [url]</code>",
-		emojiSettingsAlias, html.EscapeString(m.k.Prefix()))
+	caption := m.sf("unla_file_caption", "{prefix}", html.EscapeString(m.k.Prefix()))
 
 	return sendDocument(ctx, m.k, ev.PeerID, tmpPath, caption)
 }
@@ -484,10 +489,11 @@ func (m *settingsModule) cmdLang(ctx context.Context, ev *events.NewMessage) err
 		if current == "" {
 			current = "en"
 		}
+		// Show current language and available ones.
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>Current language:</b> <code>%s</code>\n<b>Available:</b> <code>%s</code>",
-				emojiSettingsLang, html.EscapeString(current),
-				strings.Join(settingsAvailableLangs, " | ")))
+			fmt.Sprintf(`<tg-emoji emoji-id="5397575638146110953">🌎</tg-emoji> <b>Language:</b> <code>%s</code>`+"\nAvailable: %s",
+				html.EscapeString(current),
+				strings.Join(settingsAvailableLangs, ", ")))
 	}
 
 	newLang := strings.ToLower(args[0])
@@ -500,18 +506,17 @@ func (m *settingsModule) cmdLang(ctx context.Context, ev *events.NewMessage) err
 	}
 	if !validLang {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Invalid language. Available: <code>%s</code>",
-				emojiSettingsError, strings.Join(settingsAvailableLangs, " | ")))
+			m.sf("lang_available", "{langs}", strings.Join(settingsAvailableLangs, ", ")))
 	}
 
 	m.k.Config.Language = newLang
 	if err := m.saveConfig(); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Error saving config: %s", emojiSettingsError, html.EscapeString(err.Error())))
+			fmt.Sprintf("❌ Error saving config: %s", html.EscapeString(err.Error())))
 	}
 
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Language changed to <code>%s</code>.", emojiSettingsLang, html.EscapeString(newLang)))
+		m.sf("lang_changed", "{lang}", html.EscapeString(newLang)))
 }
 
 // ---------- .cleardb ----------
@@ -519,31 +524,23 @@ func (m *settingsModule) cmdLang(ctx context.Context, ev *events.NewMessage) err
 func (m *settingsModule) cmdClearDB(ctx context.Context, ev *events.NewMessage) error {
 	args := strings.Fields(getArgsRaw(ev, m.k))
 	if !hasFlag(args, "--yes") {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>This will delete the database file!</b>\n"+
-				"Run <code>%scleardb --yes</code> to confirm.",
-				emojiSettingsDanger, html.EscapeString(m.k.Prefix())))
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("cleardb_confirm"))
 	}
 
 	dbPath := "mcub.db"
-	if m.k.DB != nil {
-		// Try to get DB file path from kernel.
-	}
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Database file <code>%s</code> not found.",
-				emojiSettingsError, html.EscapeString(dbPath)))
+			m.sf("cleardb_missing", "{path}", html.EscapeString(dbPath)))
 	}
 
 	if err := os.Remove(dbPath); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Error deleting database: %s",
-				emojiSettingsError, html.EscapeString(err.Error())))
+			m.sf("cleardb_error", "{error}", html.EscapeString(err.Error())))
 	}
 
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Database file <code>%s</code> deleted.", emojiSettingsCheck, html.EscapeString(dbPath)))
+		m.sf("cleardb_done", "{path}", html.EscapeString(dbPath)))
 }
 
 // ---------- .clearmodules ----------
@@ -557,23 +554,18 @@ func (m *settingsModule) cmdClearModules(ctx context.Context, ev *events.NewMess
 
 	if !hasFlag(args, "--yes") {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>This will delete all user modules in</b> <code>%s</code>!\n"+
-				"Run <code>%sclearmodules --yes</code> to confirm.",
-				emojiSettingsDanger, html.EscapeString(modulesDir),
-				html.EscapeString(m.k.Prefix())))
+			m.sf("clearmodules_confirm", "{path}", html.EscapeString(modulesDir)))
 	}
 
 	if _, err := os.Stat(modulesDir); os.IsNotExist(err) {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Modules directory <code>%s</code> not found.",
-				emojiSettingsError, html.EscapeString(modulesDir)))
+			m.sf("clearmodules_missing", "{path}", html.EscapeString(modulesDir)))
 	}
 
 	entries, err := os.ReadDir(modulesDir)
 	if err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Error reading directory: %s",
-				emojiSettingsError, html.EscapeString(err.Error())))
+			m.sf("clearmodules_error", "{error}", html.EscapeString(err.Error())))
 	}
 
 	deleted := 0
@@ -592,13 +584,11 @@ func (m *settingsModule) cmdClearModules(ctx context.Context, ev *events.NewMess
 
 	if deleted == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s No modules found in <code>%s</code>.",
-				emojiSettingsInfo, html.EscapeString(modulesDir)))
+			m.sf("clearmodules_missing", "{path}", html.EscapeString(modulesDir)))
 	}
 
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Deleted <b>%d</b> module(s) from <code>%s</code>.",
-			emojiSettingsCheck, deleted, html.EscapeString(modulesDir)))
+		m.sf("clearmodules_done", "{count}", strconv.Itoa(deleted)))
 }
 
 // ---------- .clearcache ----------
@@ -606,37 +596,20 @@ func (m *settingsModule) cmdClearModules(ctx context.Context, ev *events.NewMess
 func (m *settingsModule) cmdClearCache(ctx context.Context, ev *events.NewMessage) error {
 	args := strings.Fields(getArgsRaw(ev, m.k))
 	if !hasFlag(args, "--yes") {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>This will clear the kernel cache!</b>\n"+
-				"Run <code>%sclearcache --yes</code> to confirm.",
-				emojiSettingsDanger, html.EscapeString(m.k.Prefix())))
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("clearcache_confirm"))
 	}
 
 	if m.k.Cache != nil {
 		m.k.Cache.Clear()
 	}
 
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		emojiSettingsCheck+" Kernel cache cleared.")
+	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("clearcache_done"))
 }
 
 // ---------- .mcubinfo ----------
 
 func (m *settingsModule) cmdMcubInfo(ctx context.Context, ev *events.NewMessage) error {
-	info := `<blockquote><b>What is a userbot?</b>
-
-A <b>userbot</b> is a program that works under a regular Telegram account (not a bot account). Unlike official bots (@BotFather), userbots can:
-
-• Read and send messages in any chat
-• Automate routine tasks
-• Extend Telegram with custom commands
-• Work invisibly to other users</blockquote>
-
-<blockquote><b>MCUB</b> — Mitrich Core UserBot
-
-An open-source, modular userbot framework built for power users. Supports Python modules, pipelines, aliases, multi-account, and much more.</blockquote>`
-
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, info)
+	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("mcubinfo_html"))
 }
 
 // ---------- .piped ----------
@@ -650,14 +623,12 @@ func (m *settingsModule) cmdPiped(ctx context.Context, ev *events.NewMessage) er
 		m.k.Config.Piped = !current
 		if err := m.saveConfig(); err != nil {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("%s Error saving config: %s", emojiSettingsError, html.EscapeString(err.Error())))
+				fmt.Sprintf("❌ Error saving config: %s", html.EscapeString(err.Error())))
 		}
 		if m.k.Config.Piped {
-			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				emojiSettingsCheck+" Pipeline mode <b>enabled</b>.")
+			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("piped_on"))
 		}
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			emojiSettingsCheck+" Pipeline mode <b>disabled</b>.")
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("piped_off"))
 	}
 
 	switch strings.ToLower(raw) {
@@ -667,21 +638,18 @@ func (m *settingsModule) cmdPiped(ctx context.Context, ev *events.NewMessage) er
 		m.k.Config.Piped = false
 	default:
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Usage: <code>%spiped [on/off]</code>",
-				emojiSettingsError, html.EscapeString(m.k.Prefix())))
+			m.sf("piped_usage", "{prefix}", html.EscapeString(m.k.Prefix())))
 	}
 
 	if err := m.saveConfig(); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Error saving config: %s", emojiSettingsError, html.EscapeString(err.Error())))
+			fmt.Sprintf("❌ Error saving config: %s", html.EscapeString(err.Error())))
 	}
 
-	state := "disabled"
 	if m.k.Config.Piped {
-		state = "enabled"
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("piped_on"))
 	}
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Pipeline mode <b>%s</b>.", emojiSettingsCheck, state))
+	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("piped_off"))
 }
 
 // ---------- .mcub ----------
@@ -690,13 +658,10 @@ func (m *settingsModule) cmdMcub(ctx context.Context, ev *events.NewMessage) err
 	version := m.k.Version
 
 	text := fmt.Sprintf(
-		"<blockquote>%s%s%s <code>%s</code></blockquote>\n\n"+
-			"<blockquote>%s <strong>MCUB-Go</strong>\n"+
-			"%s Version <code>%s</code></blockquote>",
-		emojiSettingsMcub1, emojiSettingsMcub2, emojiSettingsMcub3,
-		html.EscapeString(version),
-		emojiSettingsTelethon,
-		emojiSettingsBranch,
+		`<tg-emoji emoji-id="5469945764069280010">🔮</tg-emoji>`+
+			`<tg-emoji emoji-id="5469943045354984820">🔮</tg-emoji>`+
+			`<tg-emoji emoji-id="5469879466954098867">🔮</tg-emoji>`+
+			` <b>MCUB-Go</b> <code>%s</code>`,
 		html.EscapeString(version),
 	)
 

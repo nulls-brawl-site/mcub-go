@@ -5,23 +5,27 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"go/token"
 	"math/big"
+	"math/rand"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/gotd/td/tg"
 	"github.com/nulls-brawl-site/mcub-go/internal/kernel"
 	"github.com/nulls-brawl-site/mcub-go/internal/loader"
 	"github.com/nulls-brawl-site/mcub-go/internal/pybridge"
 	"github.com/nulls-brawl-site/telegram-mcub-go/events"
 )
 
-// pipedModule provides piped/pipeline utility commands.
+// pipedModule provides piped/pipeline utility commands (port of utils-piped.py).
 type pipedModule struct {
-	k *kernel.Kernel
+	k        *kernel.Kernel
+	pipeVars sync.Map // export/import variable storage
 }
 
 func newPipedModule() loader.Module { return &pipedModule{} }
@@ -54,7 +58,7 @@ func (m *pipedModule) OnUnload(k interface{}) error {
 	return nil
 }
 
-// Commands implements loader.Module.
+// Commands implements loader.Module – all 24 piped commands.
 func (m *pipedModule) Commands() []loader.Command {
 	return []loader.Command{
 		{Name: "echo", Description: "[text] — echo text (supports pipe_input)", Handler: m.cmdEcho},
@@ -62,22 +66,33 @@ func (m *pipedModule) Commands() []loader.Command {
 		{Name: "head", Description: "[-N] [text] — first N lines (default 10)", Handler: m.cmdHead},
 		{Name: "tail", Description: "[-N] [text] — last N lines (default 10)", Handler: m.cmdTail},
 		{Name: "sort", Description: "[-r] [-u] [text] — sort lines", Handler: m.cmdSort},
-		{Name: "uniq", Description: "[text] — remove duplicate lines", Handler: m.cmdUniq},
+		{Name: "uniq", Description: "[-c] [text] — remove duplicate lines", Handler: m.cmdUniq},
 		{Name: "wc", Description: "[-l|-w|-c] [text] — count lines/words/chars", Handler: m.cmdWC},
 		{Name: "calc", Description: "<expr> — calculate math expression", Handler: m.cmdCalc},
-		{Name: "sed", Description: "s/from/to/[g] [text] — simple substitution", Handler: m.cmdSed},
+		{Name: "sed", Description: "[-r] s/from/to/[gi] [text] — text substitution", Handler: m.cmdSed},
 		{Name: "strip", Description: "[-e] [text] — strip whitespace from each line", Handler: m.cmdStrip},
 		{Name: "b64", Description: "[-d] [text] — base64 encode/decode", Handler: m.cmdB64},
 		{Name: "jq", Description: "[key...] — format JSON / extract fields", Handler: m.cmdJSON},
 		{Name: "sleep", Description: "<seconds> — sleep N seconds", Handler: m.cmdSleep},
 		{Name: "delete", Description: "— delete the event message", Handler: m.cmdDelete},
+		{Name: "random", Description: "[-l] [N [M]] — random number or random line", Handler: m.cmdRandom},
+		{Name: "fwd", Description: "<N> [delay] — resend replied message N times", Handler: m.cmdFwd},
+		{Name: "export", Description: "<name> [text] — save text to pipe variable", Handler: m.cmdExport},
+		{Name: "import", Description: "<name> — load pipe variable into pipe", Handler: m.cmdImport},
+		{Name: "get_reply", Description: "[text|id|sender|chat|date|media] — get reply message data", Handler: m.cmdGetReply},
+		{Name: "repeat", Description: "<N> [text] — repeat text N times", Handler: m.cmdRepeat},
+		{Name: "nop", Description: "— no operation (pass through)", Handler: m.cmdNop},
+		{Name: "if", Description: "<pattern> [text] — pass through if pattern matches", Handler: m.cmdIf},
+		{Name: "open", Description: "<path> — read file into pipe", Handler: m.cmdOpen},
+		{Name: "write", Description: "[-n] <path> [text] — write to file", Handler: m.cmdWrite},
 	}
 }
 
-// ---------- helpers ----------
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-// pipeState extracts the pipeline capture state and pipe input for a command.
-// isPiped = true when this command is running inside a pipeline.
+// pipeState extracts the pipeline capture state from the context.
 func pipeState(ctx context.Context) (state *pybridge.PipelineCaptureState, pipeInput string, isPiped bool) {
 	state = pybridge.PipelineCaptureFromContext(ctx)
 	if state != nil {
@@ -87,7 +102,7 @@ func pipeState(ctx context.Context) (state *pybridge.PipelineCaptureState, pipeI
 	return
 }
 
-// pipeEdit edits the message and, when in a pipe, records the output.
+// pipeEdit edits the message and records the output in the pipeline state.
 func (m *pipedModule) pipeEdit(ctx context.Context, ev *events.NewMessage, state *pybridge.PipelineCaptureState, text string) error {
 	if state != nil {
 		state.Capture(text)
@@ -95,7 +110,7 @@ func (m *pipedModule) pipeEdit(ctx context.Context, ev *events.NewMessage, state
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, text)
 }
 
-// args returns the raw text after the command word.
+// argsRaw returns the raw text after the command word.
 func (m *pipedModule) argsRaw(ev *events.NewMessage) string {
 	body := ev.Text()
 	if m.k != nil {
@@ -108,7 +123,9 @@ func (m *pipedModule) argsRaw(ev *events.NewMessage) string {
 	return strings.TrimSpace(body[idx+1:])
 }
 
-// ---------- .echo ----------
+// ---------------------------------------------------------------------------
+// .echo
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdEcho(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -127,7 +144,35 @@ func (m *pipedModule) cmdEcho(ctx context.Context, ev *events.NewMessage) error 
 	return m.pipeEdit(ctx, ev, state, text)
 }
 
-// ---------- .grep ----------
+// ---------------------------------------------------------------------------
+// .nop
+// ---------------------------------------------------------------------------
+
+func (m *pipedModule) cmdNop(ctx context.Context, ev *events.NewMessage) error {
+	if m.k == nil || ev.Raw == nil {
+		return nil
+	}
+	state, pipeInput, isPiped := pipeState(ctx)
+	if isPiped {
+		return m.pipeEdit(ctx, ev, state, pipeInput)
+	}
+	return m.pipeEdit(ctx, ev, state, "")
+}
+
+// ---------------------------------------------------------------------------
+// .delete
+// ---------------------------------------------------------------------------
+
+func (m *pipedModule) cmdDelete(ctx context.Context, ev *events.NewMessage) error {
+	if m.k == nil || ev.Raw == nil {
+		return nil
+	}
+	return ev.Delete(ctx)
+}
+
+// ---------------------------------------------------------------------------
+// .grep
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdGrep(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -138,8 +183,8 @@ func (m *pipedModule) cmdGrep(ctx context.Context, ev *events.NewMessage) error 
 
 	invert := false
 	useRegex := false
+	showLineNumbers := false
 
-	// Parse flags.
 	for strings.HasPrefix(args, "-") {
 		space := strings.IndexByte(args, ' ')
 		var flag string
@@ -154,15 +199,28 @@ func (m *pipedModule) cmdGrep(ctx context.Context, ev *events.NewMessage) error 
 		if strings.Contains(flag, "r") {
 			useRegex = true
 		}
+		if strings.Contains(flag, "l") {
+			showLineNumbers = true
+		}
 	}
 
-	// pattern and optional inline text.
 	pattern, inlineText := "", ""
 	if args != "" {
-		parts := strings.SplitN(args, " ", 2)
-		pattern = parts[0]
-		if len(parts) > 1 {
-			inlineText = parts[1]
+		if args[0] == '\'' || args[0] == '"' {
+			quote := args[0]
+			end := strings.IndexByte(args[1:], quote)
+			if end >= 0 {
+				pattern = args[1 : end+1]
+				inlineText = strings.TrimSpace(args[end+2:])
+			} else {
+				pattern = args[1:]
+			}
+		} else {
+			parts := strings.SplitN(args, " ", 2)
+			pattern = parts[0]
+			if len(parts) > 1 {
+				inlineText = parts[1]
+			}
 		}
 	}
 
@@ -171,12 +229,12 @@ func (m *pipedModule) cmdGrep(ctx context.Context, ev *events.NewMessage) error 
 		text = pipeInput
 	}
 	if pattern == "" || text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>grep [-v] [-r] &lt;pattern&gt; [text]</code>")
+		return m.pipeEdit(ctx, ev, state, "❌ "+m.k.Prefix()+"grep [-v] [-r] &lt;pattern&gt; [text]")
 	}
 
 	lines := strings.Split(text, "\n")
 	var matched []string
-	for _, line := range lines {
+	for i, line := range lines {
 		var matches bool
 		if useRegex {
 			re, err := regexp.Compile(pattern)
@@ -189,17 +247,23 @@ func (m *pipedModule) cmdGrep(ctx context.Context, ev *events.NewMessage) error 
 			matches = strings.Contains(line, pattern)
 		}
 		if matches != invert {
-			matched = append(matched, line)
+			if showLineNumbers {
+				matched = append(matched, fmt.Sprintf("%d: %s", i+1, line))
+			} else {
+				matched = append(matched, line)
+			}
 		}
 	}
 
 	if len(matched) == 0 {
-		return m.pipeEdit(ctx, ev, state, "<i>No match found.</i>")
+		return m.pipeEdit(ctx, ev, state, "Not found")
 	}
 	return m.pipeEdit(ctx, ev, state, strings.Join(matched, "\n"))
 }
 
-// ---------- .head ----------
+// ---------------------------------------------------------------------------
+// .head
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdHead(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -226,7 +290,7 @@ func (m *pipedModule) cmdHead(ctx context.Context, ev *events.NewMessage) error 
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>head [-N] [text]</code>")
+		return m.pipeEdit(ctx, ev, state, "❌ head [-N] [text]")
 	}
 
 	lines := strings.Split(text, "\n")
@@ -236,7 +300,9 @@ func (m *pipedModule) cmdHead(ctx context.Context, ev *events.NewMessage) error 
 	return m.pipeEdit(ctx, ev, state, strings.Join(lines, "\n"))
 }
 
-// ---------- .tail ----------
+// ---------------------------------------------------------------------------
+// .tail
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdTail(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -263,7 +329,7 @@ func (m *pipedModule) cmdTail(ctx context.Context, ev *events.NewMessage) error 
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>tail [-N] [text]</code>")
+		return m.pipeEdit(ctx, ev, state, "❌ tail [-N] [text]")
 	}
 
 	lines := strings.Split(text, "\n")
@@ -273,7 +339,9 @@ func (m *pipedModule) cmdTail(ctx context.Context, ev *events.NewMessage) error 
 	return m.pipeEdit(ctx, ev, state, strings.Join(lines, "\n"))
 }
 
-// ---------- .sort ----------
+// ---------------------------------------------------------------------------
+// .sort
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdSort(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -306,11 +374,10 @@ func (m *pipedModule) cmdSort(ctx context.Context, ev *events.NewMessage) error 
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>sort [-r] [-u] [text]</code>")
+		return m.pipeEdit(ctx, ev, state, "❌ sort [-r] [-u] [text]")
 	}
 
 	lines := strings.Split(text, "\n")
-
 	if unique {
 		seen := map[string]bool{}
 		deduped := lines[:0]
@@ -322,18 +389,18 @@ func (m *pipedModule) cmdSort(ctx context.Context, ev *events.NewMessage) error 
 		}
 		lines = deduped
 	}
-
 	sort.Strings(lines)
 	if reverse {
 		for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
 			lines[i], lines[j] = lines[j], lines[i]
 		}
 	}
-
 	return m.pipeEdit(ctx, ev, state, strings.Join(lines, "\n"))
 }
 
-// ---------- .uniq ----------
+// ---------------------------------------------------------------------------
+// .uniq
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdUniq(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -342,27 +409,49 @@ func (m *pipedModule) cmdUniq(ctx context.Context, ev *events.NewMessage) error 
 	state, pipeInput, _ := pipeState(ctx)
 	args := m.argsRaw(ev)
 
+	countMode := false
+	if strings.HasPrefix(args, "-c") {
+		countMode = true
+		args = strings.TrimSpace(args[2:])
+	}
+
 	text := args
 	if text == "" {
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>uniq [text]</code>")
+		return m.pipeEdit(ctx, ev, state, "❌ uniq [-c] [text]")
 	}
 
 	lines := strings.Split(text, "\n")
-	seen := map[string]bool{}
 	var out []string
-	for _, l := range lines {
-		if !seen[l] {
-			seen[l] = true
-			out = append(out, l)
+
+	if countMode {
+		// Group consecutive identical lines and count them.
+		i := 0
+		for i < len(lines) {
+			j := i + 1
+			for j < len(lines) && lines[j] == lines[i] {
+				j++
+			}
+			out = append(out, fmt.Sprintf("%d %s", j-i, lines[i]))
+			i = j
+		}
+	} else {
+		seen := map[string]bool{}
+		for _, l := range lines {
+			if !seen[l] {
+				seen[l] = true
+				out = append(out, l)
+			}
 		}
 	}
 	return m.pipeEdit(ctx, ev, state, strings.Join(out, "\n"))
 }
 
-// ---------- .wc ----------
+// ---------------------------------------------------------------------------
+// .wc
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdWC(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -397,7 +486,7 @@ func (m *pipedModule) cmdWC(ctx context.Context, ev *events.NewMessage) error {
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>wc [-l|-w|-c] [text]</code>")
+		return m.pipeEdit(ctx, ev, state, "❌ wc [-l|-w|-c] [text]")
 	}
 
 	var result string
@@ -406,25 +495,58 @@ func (m *pipedModule) cmdWC(ctx context.Context, ev *events.NewMessage) error {
 		result = strconv.Itoa(len(strings.Fields(text)))
 	case "c":
 		result = strconv.Itoa(len(text))
-	default:
+	default: // "l"
 		result = strconv.Itoa(len(strings.Split(text, "\n")))
 	}
-
 	return m.pipeEdit(ctx, ev, state, result)
 }
 
-// ---------- .calc ----------
+// ---------------------------------------------------------------------------
+// .calc — recursive descent arithmetic parser
+// ---------------------------------------------------------------------------
 
-// safeCalc evaluates a simple arithmetic expression (no exec).
+func (m *pipedModule) cmdCalc(ctx context.Context, ev *events.NewMessage) error {
+	if m.k == nil || ev.Raw == nil {
+		return nil
+	}
+	state, pipeInput, _ := pipeState(ctx)
+	args := m.argsRaw(ev)
+
+	expr := args
+	if expr == "" {
+		expr = pipeInput
+	}
+	if expr == "" {
+		return m.pipeEdit(ctx, ev, state, "❌ calc &lt;expr&gt;")
+	}
+
+	// If expr starts with an operator and pipeInput is a number, apply to it.
+	if len(expr) > 0 && (expr[0] == '+' || expr[0] == '-' || expr[0] == '*' || expr[0] == '/') {
+		if num, err := new(big.Float).SetPrec(256).SetString(strings.TrimSpace(pipeInput)); err {
+			opExpr := fmt.Sprintf("(%s)%s", strings.TrimSpace(pipeInput), expr)
+			result, calcErr := safeCalc(opExpr)
+			if calcErr != nil {
+				return m.pipeEdit(ctx, ev, state, "❌ Calc error: "+calcErr.Error())
+			}
+			return m.pipeEdit(ctx, ev, state, result)
+		} else {
+			_ = num
+		}
+	}
+
+	result, err := safeCalc(expr)
+	if err != nil {
+		return m.pipeEdit(ctx, ev, state, "❌ Calc error: "+err.Error())
+	}
+	return m.pipeEdit(ctx, ev, state, result)
+}
+
+// safeCalc evaluates a simple arithmetic expression using big.Float.
 func safeCalc(expr string) (string, error) {
-	expr = strings.TrimSpace(expr)
-	// Use big.Float for precision; support basic operators via go/token scanning.
-	// Simple recursive descent parser for +, -, *, /, (, ).
-	val, _, err := parseExpr(expr, 0)
+	val, _, err := parseExpr(strings.TrimSpace(expr), 0)
 	if err != nil {
 		return "", err
 	}
-	// Format nicely.
 	if val.IsInt() {
 		i, _ := val.Int(nil)
 		return i.String(), nil
@@ -464,9 +586,9 @@ func parseAddSub(s string, pos int) (*big.Float, int, error) {
 		}
 		pos = newPos
 		if op == '+' {
-			left = new(big.Float).Add(left, right)
+			left = new(big.Float).SetPrec(256).Add(left, right)
 		} else {
-			left = new(big.Float).Sub(left, right)
+			left = new(big.Float).SetPrec(256).Sub(left, right)
 		}
 	}
 	return left, pos, nil
@@ -493,12 +615,12 @@ func parseMulDiv(s string, pos int) (*big.Float, int, error) {
 		}
 		pos = newPos
 		if op == '*' {
-			left = new(big.Float).Mul(left, right)
+			left = new(big.Float).SetPrec(256).Mul(left, right)
 		} else {
 			if right.Sign() == 0 {
 				return nil, pos, fmt.Errorf("division by zero")
 			}
-			left = new(big.Float).Quo(left, right)
+			left = new(big.Float).SetPrec(256).Quo(left, right)
 		}
 	}
 	return left, pos, nil
@@ -511,7 +633,7 @@ func parseUnary(s string, pos int) (*big.Float, int, error) {
 		if err != nil {
 			return nil, newPos, err
 		}
-		return new(big.Float).Neg(val), newPos, nil
+		return new(big.Float).SetPrec(256).Neg(val), newPos, nil
 	}
 	if pos < len(s) && s[pos] == '+' {
 		return parseAtom(s, pos+1)
@@ -535,7 +657,6 @@ func parseAtom(s string, pos int) (*big.Float, int, error) {
 		}
 		return val, newPos + 1, nil
 	}
-	// Parse number.
 	end := pos
 	for end < len(s) && (s[end] >= '0' && s[end] <= '9' || s[end] == '.' || s[end] == 'e' || s[end] == 'E' ||
 		((s[end] == '+' || s[end] == '-') && end > pos && (s[end-1] == 'e' || s[end-1] == 'E'))) {
@@ -551,32 +672,9 @@ func parseAtom(s string, pos int) (*big.Float, int, error) {
 	return f, end, nil
 }
 
-// Ensure token package is used (needed for the import).
-var _ = token.ADD
-
-func (m *pipedModule) cmdCalc(ctx context.Context, ev *events.NewMessage) error {
-	if m.k == nil || ev.Raw == nil {
-		return nil
-	}
-	state, pipeInput, _ := pipeState(ctx)
-	args := m.argsRaw(ev)
-
-	expr := args
-	if expr == "" {
-		expr = pipeInput
-	}
-	if expr == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>calc &lt;expr&gt;</code>")
-	}
-
-	result, err := safeCalc(expr)
-	if err != nil {
-		return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ Calc error: %v", err))
-	}
-	return m.pipeEdit(ctx, ev, state, result)
-}
-
-// ---------- .sed ----------
+// ---------------------------------------------------------------------------
+// .sed
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdSed(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -585,11 +683,16 @@ func (m *pipedModule) cmdSed(ctx context.Context, ev *events.NewMessage) error {
 	state, pipeInput, _ := pipeState(ctx)
 	args := m.argsRaw(ev)
 
-	// Parse s/from/to/[g]
+	useRegex := false
+	if strings.HasPrefix(args, "-r ") || args == "-r" {
+		useRegex = true
+		args = strings.TrimSpace(args[2:])
+	}
+
 	re := regexp.MustCompile(`^s/(.*?)/(.*?)/([gi]*)(.*)$`)
 	match := re.FindStringSubmatch(args)
 	if match == nil {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>sed s/from/to/[g]</code>")
+		return m.pipeEdit(ctx, ev, state, "❌ sed [-r] s/from/to/[gi] [text]")
 	}
 	from, to, flags, inlineText := match[1], match[2], match[3], strings.TrimSpace(match[4])
 
@@ -598,36 +701,43 @@ func (m *pipedModule) cmdSed(ctx context.Context, ev *events.NewMessage) error {
 		text = pipeInput
 	}
 	if text == "" || from == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>sed s/from/to/[g] [text]</code>")
+		return m.pipeEdit(ctx, ev, state, "❌ sed s/from/to/[gi] [text]")
 	}
 
 	reFlags := ""
 	if strings.Contains(flags, "i") {
 		reFlags = "(?i)"
 	}
-	pattern, err := regexp.Compile(reFlags + regexp.QuoteMeta(from))
+
+	var patStr string
+	if useRegex {
+		patStr = reFlags + from
+	} else {
+		patStr = reFlags + regexp.QuoteMeta(from)
+	}
+
+	pat, err := regexp.Compile(patStr)
 	if err != nil {
-		return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ Regex error: %v", err))
+		return m.pipeEdit(ctx, ev, state, "❌ Regex error: "+err.Error())
 	}
 
 	var result string
 	if strings.Contains(flags, "g") {
-		result = pattern.ReplaceAllString(text, to)
+		result = pat.ReplaceAllString(text, to)
 	} else {
-		result = pattern.ReplaceAllLiteralString(text, to)
-		// Only first match.
-		idx := pattern.FindStringIndex(text)
+		idx := pat.FindStringIndex(text)
 		if idx != nil {
 			result = text[:idx[0]] + to + text[idx[1]:]
 		} else {
 			result = text
 		}
 	}
-
 	return m.pipeEdit(ctx, ev, state, result)
 }
 
-// ---------- .strip ----------
+// ---------------------------------------------------------------------------
+// .strip
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdStrip(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -647,7 +757,7 @@ func (m *pipedModule) cmdStrip(ctx context.Context, ev *events.NewMessage) error
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>strip [-e] [text]</code>")
+		return m.pipeEdit(ctx, ev, state, "❌ strip [-e] [text]")
 	}
 
 	lines := strings.Split(text, "\n")
@@ -662,7 +772,9 @@ func (m *pipedModule) cmdStrip(ctx context.Context, ev *events.NewMessage) error
 	return m.pipeEdit(ctx, ev, state, strings.Join(out, "\n"))
 }
 
-// ---------- .b64 ----------
+// ---------------------------------------------------------------------------
+// .b64
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdB64(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -687,28 +799,28 @@ func (m *pipedModule) cmdB64(ctx context.Context, ev *events.NewMessage) error {
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>b64 [-d] [text]</code> or <code>b64 encode|decode &lt;text&gt;</code>")
+		return m.pipeEdit(ctx, ev, state, "❌ b64 [-d] [text]")
 	}
 
 	var result string
 	if decode {
 		b, err := base64.StdEncoding.DecodeString(text)
 		if err != nil {
-			// Try URL encoding.
 			b, err = base64.URLEncoding.DecodeString(text)
 			if err != nil {
-				return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ Base64 decode error: %v", err))
+				return m.pipeEdit(ctx, ev, state, "❌ Base64 decode error: "+err.Error())
 			}
 		}
 		result = string(b)
 	} else {
 		result = base64.StdEncoding.EncodeToString([]byte(text))
 	}
-
 	return m.pipeEdit(ctx, ev, state, result)
 }
 
-// ---------- .jq (json) ----------
+// ---------------------------------------------------------------------------
+// .jq (json)
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdJSON(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -726,24 +838,22 @@ func (m *pipedModule) cmdJSON(ctx context.Context, ev *events.NewMessage) error 
 	keys := strings.Fields(args)
 
 	if raw == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>jq [key1 key2...] [json]</code> (or pipe JSON)")
+		return m.pipeEdit(ctx, ev, state, "❌ jq [key1 key2...] — pipe JSON or provide inline")
 	}
 
 	var data interface{}
 	if err := json.Unmarshal([]byte(raw), &data); err != nil {
-		return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ JSON parse error: %v", err))
+		return m.pipeEdit(ctx, ev, state, "❌ JSON parse error: "+err.Error())
 	}
 
 	if len(keys) == 0 {
-		// Pretty print.
 		b, err := json.MarshalIndent(data, "", "  ")
 		if err != nil {
-			return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ JSON marshal error: %v", err))
+			return m.pipeEdit(ctx, ev, state, "❌ JSON marshal error: "+err.Error())
 		}
 		return m.pipeEdit(ctx, ev, state, string(b))
 	}
 
-	// Extract keys.
 	var values []string
 	for _, key := range keys {
 		val := jsonGet(data, key)
@@ -781,7 +891,9 @@ func jsonGet(data interface{}, dotPath string) interface{} {
 	return cur
 }
 
-// ---------- .sleep ----------
+// ---------------------------------------------------------------------------
+// .sleep
+// ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdSleep(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
@@ -791,7 +903,7 @@ func (m *pipedModule) cmdSleep(ctx context.Context, ev *events.NewMessage) error
 	args := m.argsRaw(ev)
 
 	if args == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ Usage: <code>sleep &lt;seconds&gt;</code>")
+		return m.pipeEdit(ctx, ev, state, "❌ sleep &lt;seconds&gt;")
 	}
 
 	secs, err := strconv.ParseFloat(strings.TrimSpace(args), 64)
@@ -802,15 +914,464 @@ func (m *pipedModule) cmdSleep(ctx context.Context, ev *events.NewMessage) error
 		return m.pipeEdit(ctx, ev, state, "❌ Maximum sleep is 300 seconds.")
 	}
 
-	time.Sleep(time.Duration(secs * float64(time.Second)))
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Duration(secs * float64(time.Second))):
+	}
 	return m.pipeEdit(ctx, ev, state, "ok")
 }
 
-// ---------- .delete ----------
+// ---------------------------------------------------------------------------
+// .random
+// ---------------------------------------------------------------------------
 
-func (m *pipedModule) cmdDelete(ctx context.Context, ev *events.NewMessage) error {
+func (m *pipedModule) cmdRandom(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
-	return ev.Delete(ctx)
+	state, pipeInput, _ := pipeState(ctx)
+	args := m.argsRaw(ev)
+
+	pickLine := false
+	lineRe := regexp.MustCompile(`(?:^|\s)-l(?:\s|$)`)
+	if lineRe.MatchString(args) {
+		pickLine = true
+		args = strings.TrimSpace(lineRe.ReplaceAllString(args, " "))
+	}
+
+	var result string
+
+	if pickLine {
+		text := args
+		if text == "" {
+			text = pipeInput
+		}
+		if text == "" {
+			return m.pipeEdit(ctx, ev, state, "❌ random -l [text]")
+		}
+		var lines []string
+		for _, l := range strings.Split(text, "\n") {
+			if strings.TrimSpace(l) != "" {
+				lines = append(lines, l)
+			}
+		}
+		if len(lines) == 0 {
+			return m.pipeEdit(ctx, ev, state, "Not found")
+		}
+		result = lines[rand.Intn(len(lines))] // #nosec G404
+	} else {
+		parts := strings.Fields(args)
+		lo, hi := 0, 100
+		switch len(parts) {
+		case 0:
+			// defaults
+		case 1:
+			n, err := strconv.Atoi(parts[0])
+			if err != nil {
+				return m.pipeEdit(ctx, ev, state, "❌ random [-l] [N [M]]")
+			}
+			hi = n
+		default:
+			n1, err1 := strconv.Atoi(parts[0])
+			n2, err2 := strconv.Atoi(parts[1])
+			if err1 != nil || err2 != nil {
+				return m.pipeEdit(ctx, ev, state, "❌ random [-l] [N [M]]")
+			}
+			lo, hi = n1, n2
+		}
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		result = strconv.Itoa(lo + rand.Intn(hi-lo+1)) // #nosec G404
+	}
+	return m.pipeEdit(ctx, ev, state, result)
+}
+
+// ---------------------------------------------------------------------------
+// .fwd — resend replied message N times (without forward attribution)
+// ---------------------------------------------------------------------------
+
+func (m *pipedModule) cmdFwd(ctx context.Context, ev *events.NewMessage) error {
+	if m.k == nil || ev.Raw == nil {
+		return nil
+	}
+	state, _, _ := pipeState(ctx)
+
+	if ev.ReplyToMsgID == 0 {
+		return m.pipeEdit(ctx, ev, state, "❌ Reply to a message first")
+	}
+
+	args := strings.Fields(m.argsRaw(ev))
+	n := 1
+	delay := 0.0
+
+	if len(args) >= 1 {
+		if num, err := strconv.Atoi(args[0]); err == nil {
+			n = num
+		}
+	}
+	if len(args) >= 2 {
+		if d, err := strconv.ParseFloat(args[1], 64); err == nil {
+			delay = d
+		}
+	}
+
+	if n < 1 || n > 200 {
+		return m.pipeEdit(ctx, ev, state, "❌ N must be between 1 and 200")
+	}
+
+	// Fetch the replied message.
+	msgs, err := m.k.Client.GetMessages(ctx, ev.PeerID, []int{ev.ReplyToMsgID})
+	if err != nil || len(msgs) == 0 || msgs[0] == nil {
+		return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ Failed to get message: %v", err))
+	}
+	msg := msgs[0]
+
+	// Show progress.
+	_ = m.pipeEdit(ctx, ev, state, fmt.Sprintf("Forwarding %d time(s)...", n))
+
+	sent := 0
+	for i := 0; i < n; i++ {
+		var sendErr error
+		if msg.Media != nil {
+			// Has media: forward using ForwardMessage.
+			sendErr = m.k.Client.ForwardMessage(ctx, ev.PeerID, ev.PeerID, ev.ReplyToMsgID)
+		} else {
+			// Text-only: resend content without attribution.
+			sendErr = sendHTML(ctx, m.k, ev.PeerID, msg.Message)
+		}
+		if sendErr == nil {
+			sent++
+		}
+		if delay > 0 && i < n-1 {
+			select {
+			case <-ctx.Done():
+				break
+			case <-time.After(time.Duration(delay * float64(time.Second))):
+			}
+		}
+	}
+	return m.pipeEdit(ctx, ev, state, fmt.Sprintf("Done: %d/%d sent", sent, n))
+}
+
+// ---------------------------------------------------------------------------
+// .export — save text to named pipe variable
+// ---------------------------------------------------------------------------
+
+func (m *pipedModule) cmdExport(ctx context.Context, ev *events.NewMessage) error {
+	if m.k == nil || ev.Raw == nil {
+		return nil
+	}
+	state, pipeInput, _ := pipeState(ctx)
+	args := strings.TrimSpace(m.argsRaw(ev))
+
+	if args == "" && pipeInput == "" {
+		return m.pipeEdit(ctx, ev, state, "❌ export &lt;name&gt; [text]")
+	}
+
+	if args == "" {
+		// No name given; just pass through.
+		return m.pipeEdit(ctx, ev, state, pipeInput)
+	}
+
+	parts := strings.SplitN(args, " ", 2)
+	name := parts[0]
+	var value string
+	if len(parts) > 1 {
+		value = parts[1]
+	} else {
+		value = pipeInput
+	}
+
+	if value == "" {
+		return m.pipeEdit(ctx, ev, state, "❌ export &lt;name&gt; [text]")
+	}
+
+	m.pipeVars.Store(name, value)
+	return m.pipeEdit(ctx, ev, state, fmt.Sprintf("exported: %s", name))
+}
+
+// ---------------------------------------------------------------------------
+// .import — load named pipe variable
+// ---------------------------------------------------------------------------
+
+func (m *pipedModule) cmdImport(ctx context.Context, ev *events.NewMessage) error {
+	if m.k == nil || ev.Raw == nil {
+		return nil
+	}
+	state, _, _ := pipeState(ctx)
+	args := strings.TrimSpace(m.argsRaw(ev))
+
+	if args == "" {
+		return m.pipeEdit(ctx, ev, state, "❌ import &lt;name&gt;")
+	}
+
+	name := strings.Fields(args)[0]
+	raw, ok := m.pipeVars.Load(name)
+	if !ok {
+		return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ not found: %s", name))
+	}
+	return m.pipeEdit(ctx, ev, state, raw.(string))
+}
+
+// ---------------------------------------------------------------------------
+// .get_reply — get data from the replied message
+// ---------------------------------------------------------------------------
+
+func (m *pipedModule) cmdGetReply(ctx context.Context, ev *events.NewMessage) error {
+	if m.k == nil || ev.Raw == nil {
+		return nil
+	}
+	state, _, _ := pipeState(ctx)
+	args := strings.ToLower(strings.TrimSpace(m.argsRaw(ev)))
+
+	if ev.ReplyToMsgID == 0 {
+		return m.pipeEdit(ctx, ev, state, "❌ No reply message")
+	}
+
+	msgs, err := m.k.Client.GetMessages(ctx, ev.PeerID, []int{ev.ReplyToMsgID})
+	if err != nil || len(msgs) == 0 || msgs[0] == nil {
+		return m.pipeEdit(ctx, ev, state, "❌ No reply message")
+	}
+	msg := msgs[0]
+
+	var result string
+	switch args {
+	case "id":
+		result = strconv.Itoa(msg.ID)
+	case "sender":
+		if msg.FromID != nil {
+			switch peer := msg.FromID.(type) {
+			case *tg.PeerUser:
+				result = strconv.FormatInt(peer.UserID, 10)
+			case *tg.PeerChannel:
+				result = strconv.FormatInt(peer.ChannelID, 10)
+			case *tg.PeerChat:
+				result = strconv.FormatInt(peer.ChatID, 10)
+			}
+		}
+	case "chat":
+		result = strconv.FormatInt(ev.PeerID, 10)
+	case "date":
+		result = strconv.FormatInt(int64(msg.Date), 10)
+	case "media":
+		if msg.Media != nil {
+			result = "true"
+		} else {
+			result = "false"
+		}
+	default: // "text" or empty
+		result = msg.Message
+	}
+	return m.pipeEdit(ctx, ev, state, result)
+}
+
+// ---------------------------------------------------------------------------
+// .repeat — repeat text N times
+// ---------------------------------------------------------------------------
+
+func (m *pipedModule) cmdRepeat(ctx context.Context, ev *events.NewMessage) error {
+	if m.k == nil || ev.Raw == nil {
+		return nil
+	}
+	state, pipeInput, _ := pipeState(ctx)
+	args := strings.TrimSpace(m.argsRaw(ev))
+
+	if args == "" {
+		return m.pipeEdit(ctx, ev, state, "❌ repeat &lt;N&gt; [text]")
+	}
+
+	parts := strings.SplitN(args, " ", 3)
+	n, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return m.pipeEdit(ctx, ev, state, "❌ repeat &lt;N&gt; [text]")
+	}
+	if n < 1 || n > 100 {
+		return m.pipeEdit(ctx, ev, state, "❌ N must be between 1 and 100")
+	}
+
+	sep := "\n"
+	text := ""
+
+	if len(parts) >= 2 {
+		// Check for quoted separator.
+		rest := strings.Join(parts[1:], " ")
+		if len(rest) > 0 && (rest[0] == '\'' || rest[0] == '"') {
+			quote := rest[0]
+			end := strings.IndexByte(rest[1:], quote)
+			if end >= 0 {
+				sep = rest[1 : end+1]
+				text = strings.TrimSpace(rest[end+2:])
+			} else {
+				text = rest
+			}
+		} else {
+			text = rest
+		}
+	}
+
+	if text == "" {
+		text = pipeInput
+	}
+	if text == "" {
+		return m.pipeEdit(ctx, ev, state, "❌ repeat &lt;N&gt; [text]")
+	}
+
+	repeated := make([]string, n)
+	for i := range repeated {
+		repeated[i] = text
+	}
+	return m.pipeEdit(ctx, ev, state, strings.Join(repeated, sep))
+}
+
+// ---------------------------------------------------------------------------
+// .if — pass through if pattern matches, else stop pipeline
+// ---------------------------------------------------------------------------
+
+func (m *pipedModule) cmdIf(ctx context.Context, ev *events.NewMessage) error {
+	if m.k == nil || ev.Raw == nil {
+		return nil
+	}
+	state, pipeInput, _ := pipeState(ctx)
+	args := strings.TrimSpace(m.argsRaw(ev))
+
+	if args == "" {
+		return m.pipeEdit(ctx, ev, state, "❌ if &lt;pattern&gt; [text]")
+	}
+
+	var pattern, inlineText string
+	if args[0] == '\'' || args[0] == '"' {
+		quote := args[0]
+		end := strings.IndexByte(args[1:], quote)
+		if end >= 0 {
+			pattern = args[1 : end+1]
+			inlineText = strings.TrimSpace(args[end+2:])
+		} else {
+			pattern = args[1:]
+		}
+	} else {
+		parts := strings.SplitN(args, " ", 2)
+		pattern = parts[0]
+		if len(parts) > 1 {
+			inlineText = parts[1]
+		}
+	}
+
+	text := inlineText
+	if text == "" {
+		text = pipeInput
+	}
+	if text == "" {
+		return m.pipeEdit(ctx, ev, state, "❌ if &lt;pattern&gt; [text]")
+	}
+
+	re, err := regexp.Compile(pattern)
+	var matched bool
+	if err != nil {
+		matched = strings.Contains(text, pattern)
+	} else {
+		matched = re.MatchString(text)
+	}
+
+	if matched {
+		return m.pipeEdit(ctx, ev, state, text)
+	}
+	return m.pipeEdit(ctx, ev, state, "No match - pipeline stopped")
+}
+
+// ---------------------------------------------------------------------------
+// .open — read a file into the pipe
+// ---------------------------------------------------------------------------
+
+func (m *pipedModule) cmdOpen(ctx context.Context, ev *events.NewMessage) error {
+	if m.k == nil || ev.Raw == nil {
+		return nil
+	}
+	state, pipeInput, isPiped := pipeState(ctx)
+	args := strings.TrimSpace(m.argsRaw(ev))
+
+	filePath := args
+	if filePath == "" {
+		filePath = strings.TrimSpace(pipeInput)
+	}
+	if filePath == "" {
+		return m.pipeEdit(ctx, ev, state, "❌ open &lt;path&gt;")
+	}
+
+	// Allow both absolute and relative paths.
+	content, err := os.ReadFile(filePath) // #nosec G304
+	if err != nil {
+		if os.IsNotExist(err) {
+			return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ File not found: %s", filePath))
+		}
+		return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ Error: %v", err))
+	}
+
+	text := string(content)
+	if isPiped {
+		return m.pipeEdit(ctx, ev, state, text)
+	}
+	lines := strings.Split(text, "\n")
+	info := fmt.Sprintf("<b>%s</b>\n%d lines | %d bytes",
+		filePath, len(lines), len(content))
+	return m.pipeEdit(ctx, ev, state, info)
+}
+
+// ---------------------------------------------------------------------------
+// .write — write text to a file
+// ---------------------------------------------------------------------------
+
+func (m *pipedModule) cmdWrite(ctx context.Context, ev *events.NewMessage) error {
+	if m.k == nil || ev.Raw == nil {
+		return nil
+	}
+	state, pipeInput, _ := pipeState(ctx)
+	args := strings.TrimSpace(m.argsRaw(ev))
+
+	append_ := false
+	if strings.HasPrefix(args, "-n ") || args == "-n" {
+		append_ = true
+		args = strings.TrimSpace(args[2:])
+	}
+
+	if args == "" {
+		return m.pipeEdit(ctx, ev, state, "❌ write [-n] &lt;path&gt; [text]")
+	}
+
+	parts := strings.SplitN(args, " ", 2)
+	path := parts[0]
+	var text string
+	if len(parts) > 1 {
+		text = parts[1]
+	} else {
+		text = pipeInput
+	}
+
+	if path == "" || text == "" {
+		return m.pipeEdit(ctx, ev, state, "❌ write [-n] &lt;path&gt; [text]")
+	}
+
+	// Create parent directories.
+	if dir := strings.LastIndex(path, "/"); dir > 0 {
+		if err := os.MkdirAll(path[:dir], 0o755); err != nil {
+			return m.pipeEdit(ctx, ev, state, "❌ Write error: "+err.Error())
+		}
+	}
+
+	var f *os.File
+	var openErr error
+	if append_ {
+		f, openErr = os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) // #nosec G304
+	} else {
+		f, openErr = os.Create(path) // #nosec G304
+	}
+	if openErr != nil {
+		return m.pipeEdit(ctx, ev, state, "❌ Write error: "+openErr.Error())
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(text); err != nil {
+		return m.pipeEdit(ctx, ev, state, "❌ Write error: "+err.Error())
+	}
+	return m.pipeEdit(ctx, ev, state, fmt.Sprintf("Written: %s", path))
 }

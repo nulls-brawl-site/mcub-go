@@ -251,6 +251,17 @@ class ModuleBase:
                 for a in ([alias] if isinstance(alias, str) else alias):
                     _command_handlers[(mod_name, a)] = _bound
 
+    def __getattribute__(self, name):
+        # Always route 'strings' through _strings_obj so that a subclass
+        # class-level dict (e.g. ``strings = {"name": "tester"}``) does not
+        # shadow the _SimpleStrings wrapper we create in __init__.
+        if name == 'strings':
+            try:
+                return object.__getattribute__(self, '_strings_obj')
+            except AttributeError:
+                pass
+        return object.__getattribute__(self, name)
+
     @property
     def strings(self):
         return object.__getattribute__(self, '_strings_obj')
@@ -1410,6 +1421,18 @@ class KernelProxy:
         """
         return False
 
+    def register_callback_handler(self, pattern, handler, **kwargs):
+        """Register an inline callback handler (no-op stub – handled by Go)."""
+        pass
+
+    def register_inline_handler(self, name, handler, **kwargs):
+        """Register an inline query handler (no-op stub – handled by Go)."""
+        pass
+
+    def register_watcher(self, handler, **kwargs):
+        """Register a message watcher (no-op stub – handled by Go)."""
+        pass
+
     def get_prefix_for_sender(self, sender_id):
         """Return the command prefix active for a given sender.
 
@@ -1533,10 +1556,26 @@ class _SimpleStrings:
             raise AttributeError(name)
         return self._get(name)
 
+    def _try_get(self, key):
+        """Like _get but returns None instead of the key when not found."""
+        if isinstance(self._data, dict):
+            module_name = self._data.get("name")
+            if module_name and _LANGPACK_DATA:
+                val = _langpack_get(module_name, key, self._locale)
+                if val is not None:
+                    return val
+            locale_data = self._data.get(self._locale, self._data.get("en", {}))
+            if isinstance(locale_data, dict) and key in locale_data:
+                return str(locale_data[key])
+            if key in self._data and not isinstance(self._data[key], dict):
+                return str(self._data[key])
+        return None
+
     def get(self, key, default=None):
         if not key:
             return default
-        return self._get(key)
+        val = self._try_get(key)
+        return val if val is not None else default
 
     def keys(self):
         if isinstance(self._data, dict):
@@ -1969,7 +2008,7 @@ class _HikkaModule(ModuleBase):
 
     def __init_subclass__(cls, **kwargs):
         # ModuleBase.__init_subclass__ runs first and populates _cmd_registry
-        # for any _mcub_command-decorated methods.
+        # for any _mcub_command-decorated methods (including _mcub_commands list).
         super().__init_subclass__(**kwargs)
         # Now additionally scan for Hikka-style @loader.command decorators
         # which set __hikka_command__ = True and/or is_command = True.
@@ -1983,9 +2022,15 @@ class _HikkaModule(ModuleBase):
             )
             if not is_hikka_cmd:
                 continue
+            # If already picked up via _mcub_commands (set by alternate decorators),
+            # skip to avoid duplicate registry entries.
+            if hasattr(attr, "_mcub_commands") and attr._mcub_commands:
+                # Already registered by ModuleBase.__init_subclass__
+                continue
             # Derive command name from the method name
             cmd_name = getattr(attr, "_mcub_cmd_name", None)
             if cmd_name is None:
+                # Hikka convention: method ends with "cmd" → strip it
                 if attr_name.endswith("cmd"):
                     cmd_name = attr_name[:-3]
                 elif attr_name.endswith("Cmd"):
@@ -2163,6 +2208,13 @@ _hikka_loader_mod.on = _hikka_on
 _hikka_loader_mod.ConfigValue = _make_stub_class("ConfigValue")
 _hikka_loader_mod.ModuleConfig = _make_stub_class("ModuleConfig")
 _hikka_loader_mod.Library = _make_stub_class("Library")
+# ── KEY FIX: `from hikka.loader import loader` expects hikka.loader to have a
+#    `.loader` attribute that IS the namespace with Module/command/etc.
+#    We point it back at the module itself so the pattern works:
+#      from hikka.loader import loader
+#      class Mod(loader.Module): ...
+#      @loader.command()           ...
+_hikka_loader_mod.loader = _hikka_loader_mod
 
 # ─── Fake hikka.* package stubs ───────────────────────────────────────────────
 
@@ -2198,6 +2250,9 @@ _hikka_utils_mod.get_chat_id = lambda m: getattr(m, "chat_id", 0)
 
 _heroku_pkg = types.ModuleType("Heroku")
 _heroku_pkg.__path__ = []
+# Heroku modules may use `from Heroku import loader` or `from Heroku.loader import loader`
+# Wire the same hikka_loader_mod so both patterns resolve identically.
+_heroku_pkg.loader = _hikka_loader_mod
 
 # ─── Register all Hikka/Heroku stubs in sys.modules ──────────────────────────
 
@@ -2208,7 +2263,9 @@ for _hname, _hmod in [
     ("hikka.utils", _hikka_utils_mod),
     ("loader", _hikka_loader_mod),
     ("Heroku", _heroku_pkg),
+    ("Heroku.loader", _hikka_loader_mod),
     ("heroku", _heroku_pkg),
+    ("heroku.loader", _hikka_loader_mod),
 ]:
     if _hname not in sys.modules or isinstance(
         sys.modules[_hname], _MagicStubModule
@@ -2219,5 +2276,46 @@ for _hname, _hmod in [
 sys.modules["hikka"].loader = _hikka_loader_mod
 sys.modules["hikka"].types = _hikka_types_mod
 sys.modules["hikka"].utils = _hikka_utils_mod
+
+# Also wire .loader on the bare `loader` module so that:
+#   import loader; loader.loader.Module   and
+#   from loader import loader             work identically.
+sys.modules["loader"].loader = _hikka_loader_mod
+
+# ── Self-registration of mcub_compat in sys.modules ──────────────────────────
+# When modules do `from mcub_compat import _command_handlers` (or similar)
+# we need this file's namespace to be importable as 'mcub_compat'.
+# We create a real module object, populate it with all public names, and
+# register it so subsequent `import mcub_compat` / `from mcub_compat import X`
+# work correctly regardless of how this file was loaded (exec() vs import).
+
+def _register_mcub_compat_module():
+    _this_mod = sys.modules.get("mcub_compat")
+    if _this_mod is not None and not isinstance(_this_mod, _MagicStubModule):
+        return  # already a real registration
+
+    _mod = types.ModuleType("mcub_compat")
+    _mod.__file__ = __file__ if "__file__" in dir() else "<mcub_compat>"
+    # Expose the key public symbols that other code may import.
+    _mod._command_handlers = _command_handlers
+    _mod._module_instances = _module_instances
+    _mod.ModuleBase = ModuleBase
+    _mod.KernelProxy = KernelProxy
+    _mod.ClientProxy = ClientProxy
+    _mod.Event = Event
+    _mod.command = command
+    _mod.watcher = watcher
+    _mod.inline = inline
+    _mod.callback = callback
+    _mod.loop = loop
+    _mod.ModuleConfig = ModuleConfig
+    _mod.ConfigValue = ConfigValue
+    _mod._SimpleStrings = _SimpleStrings
+    _mod._SimpleCache = _SimpleCache
+    _mod._HikkaModule = _HikkaModule
+    _mod._HikkaDB = _HikkaDB
+    sys.modules["mcub_compat"] = _mod
+
+_register_mcub_compat_module()
 
 print("[mcub_compat] Python compatibility layer loaded", flush=True)

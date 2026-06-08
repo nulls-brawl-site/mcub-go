@@ -19,17 +19,17 @@ import (
 
 // Custom emoji IDs used by the tester module (exact matches from Python source).
 const (
-	emojiPen        = `<tg-emoji emoji-id="5334673106202010226">✏️</tg-emoji>`
-	emojiSnowflake  = `<tg-emoji emoji-id="5431895003821513760">❄️</tg-emoji>`
-	emojiSpeech     = `<tg-emoji emoji-id="5465132703458270101">🗯</tg-emoji>`
-	emojiIce        = `<tg-emoji emoji-id="5404728536810398694">🧊</tg-emoji>`
-	emojiCheck      = `<tg-emoji emoji-id="5454096630372379732">☑️</tg-emoji>`
-	emojiFile       = `<tg-emoji emoji-id="5433653135799228968">📁</tg-emoji>`
-	emojiNote       = `<tg-emoji emoji-id="5334882760735598374">📝</tg-emoji>`
-	emojiPrinter    = `<tg-emoji emoji-id="5386494631112353009">🖨</tg-emoji>`
-	emojiNewspaper  = `<tg-emoji emoji-id="5433982607035474385">📰</tg-emoji>`
-	emojiBallotBox  = `<tg-emoji emoji-id="5359741159566484212">🗳</tg-emoji>`
-	emojiSatellite  = `<tg-emoji emoji-id="5321304062715517873">🛰</tg-emoji>`
+	emojiPen       = `<tg-emoji emoji-id="5334673106202010226">✏️</tg-emoji>`
+	emojiSnowflake = `<tg-emoji emoji-id="5431895003821513760">❄️</tg-emoji>`
+	emojiSpeech    = `<tg-emoji emoji-id="5465132703458270101">🗯</tg-emoji>`
+	emojiIce       = `<tg-emoji emoji-id="5404728536810398694">🧊</tg-emoji>`
+	emojiCheck     = `<tg-emoji emoji-id="5454096630372379732">☑️</tg-emoji>`
+	emojiFile      = `<tg-emoji emoji-id="5433653135799228968">📁</tg-emoji>`
+	emojiNote      = `<tg-emoji emoji-id="5334882760735598374">📝</tg-emoji>`
+	emojiPrinter   = `<tg-emoji emoji-id="5386494631112353009">🖨</tg-emoji>`
+	emojiNewspaper = `<tg-emoji emoji-id="5433982607035474385">📰</tg-emoji>`
+	emojiBallotBox = `<tg-emoji emoji-id="5359741159566484212">🗳</tg-emoji>`
+	emojiSatellite = `<tg-emoji emoji-id="5321304062715517873">🛰</tg-emoji>`
 )
 
 // testerModule implements the "tester" system module.
@@ -95,23 +95,31 @@ func (m *testerModule) detectBranch() string {
 	return "main"
 }
 
+// formatUptime formats a duration using langpack time-unit strings.
+// Output matches Python: "1h 2m 3s", "2m 3s", or "3s".
 func (m *testerModule) formatUptime(d time.Duration) string {
 	total := int(d.Seconds())
 	hours := total / 3600
 	minutes := (total % 3600) / 60
 	seconds := total % 60
+
+	h := s(m.k, "tester", "hours")
+	mi := s(m.k, "tester", "minutes")
+	sec := s(m.k, "tester", "seconds")
+
 	if hours > 0 {
-		return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
+		return fmt.Sprintf("%d%s %d%s %d%s", hours, h, minutes, mi, seconds, sec)
 	}
 	if minutes > 0 {
-		return fmt.Sprintf("%dm %ds", minutes, seconds)
+		return fmt.Sprintf("%d%s %d%s", minutes, mi, seconds, sec)
 	}
-	return fmt.Sprintf("%ds", seconds)
+	return fmt.Sprintf("%d%s", seconds, sec)
 }
 
 // ---------- .ping ----------
 
 // cmdPing edits the message, measures latency, and reports ping + uptime.
+// Output matches Python tester.py cmd_ping exactly.
 func (m *testerModule) cmdPing(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || m.k.Client == nil || ev.Raw == nil {
 		return nil
@@ -125,10 +133,15 @@ func (m *testerModule) cmdPing(ctx context.Context, ev *events.NewMessage) error
 
 	uptime := m.formatUptime(m.k.Uptime())
 
+	pingLabel := s(m.k, "tester", "ping")
+	msLabel := s(m.k, "tester", "ms")
+	uptimeLabel := s(m.k, "tester", "uptime")
+
 	resp := fmt.Sprintf(
-		`<blockquote>%s <b>ping:</b> %.2f ms</blockquote>`+"\n"+
-			`<blockquote>%s <b>uptime:</b> %s</blockquote>`,
-		emojiPen, pingMs, emojiPen, uptime,
+		`<blockquote>%s <b>%s:</b> %.2f %s</blockquote>`+"\n"+
+			`<blockquote>%s <b>%s:</b> %s</blockquote>`,
+		emojiPen, pingLabel, pingMs, msLabel,
+		emojiPen, uptimeLabel, uptime,
 	)
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, resp)
 }
@@ -151,13 +164,13 @@ func (m *testerModule) cmdLogs(ctx context.Context, ev *events.NewMessage) error
 
 	if _, err := os.Stat(logPath); os.IsNotExist(err) {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s File kernel.log not found", emojiFile))
+			sf(m.k, "tester", "logs_not_found", map[string]interface{}{"file": emojiFile}))
 	}
 
 	info, _ := os.Stat(logPath)
 	if info != nil && info.Size() == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>Is logs empty</b>", emojiBallotBox))
+			fmt.Sprintf("%s <b>%s</b>", emojiBallotBox, s(m.k, "tester", "file_empty")))
 	}
 
 	// Parse args: strip prefix + "logs"
@@ -165,11 +178,8 @@ func (m *testerModule) cmdLogs(ctx context.Context, ev *events.NewMessage) error
 
 	if len(args) == 0 {
 		// Show level selector with inline buttons.
-		text := fmt.Sprintf(
-			`%s <b>Choose log level</b>`+"\n"+
-				`Send only selected records from <code>kernel.log</code>.`,
-			emojiNewspaper,
-		)
+		text := sf(m.k, "tester", "logs_choose_level", map[string]interface{}{"paper": emojiNewspaper}) +
+			"\n" + s(m.k, "tester", "logs_choose_desc")
 		buttons := mcubtypes.ButtonGrid{
 			mcubtypes.ButtonRow{newButton("DEBUG", "logs:level:debug"), newButton("INFO", "logs:level:info")},
 			mcubtypes.ButtonRow{newButton("WARNING", "logs:level:warning"), newButton("ERROR", "logs:level:error")},
@@ -187,7 +197,7 @@ func (m *testerModule) cmdLogs(ctx context.Context, ev *events.NewMessage) error
 				fmt.Sprintf("%s Error clearing logs: %v", emojiSnowflake, err))
 		}
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>Cleared kernel logs</b>", emojiBallotBox))
+			fmt.Sprintf("%s <b>%s</b>", emojiBallotBox, s(m.k, "tester", "logs_clear")))
 	}
 
 	if arg0 == "tail" {
@@ -209,13 +219,11 @@ func (m *testerModule) cmdLogs(ctx context.Context, ev *events.NewMessage) error
 
 	if !logLevels[arg0] {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf(`%s <b>Available arguments:</b> <code>clear</code>, <code>debug</code>, `+
-				`<code>info</code>, <code>warning</code>, <code>error</code>, `+
-				`<code>critical</code>, <code>all</code>`, emojiIce))
+			fmt.Sprintf("%s %s", emojiIce, s(m.k, "tester", "logs_not_fount_args")))
 	}
 
 	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Sending kernel logs", emojiPrinter)); err != nil {
+		sf(m.k, "tester", "logs_sending", map[string]interface{}{"printer": emojiPrinter})); err != nil {
 		return err
 	}
 	return m.sendLogsLevel(ctx, ev.PeerID, arg0, logPath)
@@ -231,7 +239,7 @@ func (m *testerModule) sendLogsLevel(ctx context.Context, peerID int64, level, l
 		filtered, err := filterLogByLevel(logPath, strings.ToUpper(level))
 		if err != nil || filtered == "" {
 			return sendHTML(ctx, m.k, peerID,
-				fmt.Sprintf("%s <b>Is logs empty</b>", emojiBallotBox))
+				fmt.Sprintf("%s <b>%s</b>", emojiBallotBox, s(m.k, "tester", "file_empty")))
 		}
 		tempPath = filtered
 		targetPath = filtered
@@ -245,13 +253,14 @@ func (m *testerModule) sendLogsLevel(ctx context.Context, peerID int64, level, l
 
 	branch := m.detectBranch()
 	caption := fmt.Sprintf(
-		`%s <b>Logs</b> MCUB`+"\n\n"+
-			`<blockquote>%s <b>Kernel Version</b> %s`+"\n"+
-			`%s <b>Branch:</b> %s`+"\n"+
-			`%s <b>Level:</b> <code>%s</code></blockquote>`,
-		emojiNote, emojiPen, m.k.Version,
-		emojiSatellite, branch,
-		emojiPrinter, strings.ToUpper(level),
+		`%s <b>%s</b> MCUB`+"\n\n"+
+			`<blockquote>%s <b>%s</b> %s`+"\n"+
+			`%s <b>%s:</b> %s`+"\n"+
+			`%s <b>%s:</b> <code>%s</code></blockquote>`,
+		emojiNote, s(m.k, "tester", "logs"),
+		emojiPen, s(m.k, "tester", "kernel_version"), m.k.Version,
+		emojiSatellite, s(m.k, "tester", "branch"), branch,
+		emojiPrinter, "Level", strings.ToUpper(level),
 	)
 
 	return sendDocument(ctx, m.k, peerID, targetPath, caption)
@@ -344,6 +353,7 @@ func (m *testerModule) parseArgs(ev *events.NewMessage) []string {
 // ---------- .freezing ----------
 
 // cmdFreezing simulates a userbot freeze by sleeping for N seconds.
+// Strings match Python tester.py cmd_freezing exactly (via langpacks).
 func (m *testerModule) cmdFreezing(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -357,28 +367,37 @@ func (m *testerModule) cmdFreezing(ctx context.Context, ev *events.NewMessage) e
 
 	if len(args) == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Usage: %sfreezing [seconds]", emojiSpeech, prefix))
+			sf(m.k, "tester", "freezing_usage", map[string]interface{}{
+				"speech": emojiSpeech,
+				"prefix": prefix,
+			}))
 	}
 
 	var seconds int
 	if _, err := fmt.Sscanf(args[0], "%d", &seconds); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Specify number of seconds", emojiSpeech))
+			sf(m.k, "tester", "freezing_number", map[string]interface{}{"speech": emojiSpeech}))
 	}
 	if seconds <= 0 || seconds > 60 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s Specify from 1 to 60 seconds", emojiSpeech))
+			sf(m.k, "tester", "freezing_range", map[string]interface{}{"speech": emojiSpeech}))
 	}
 
 	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Freezing for %d seconds...", emojiIce, seconds)); err != nil {
+		sf(m.k, "tester", "freezing_start", map[string]interface{}{
+			"snowflake": emojiIce,
+			"seconds":   seconds,
+		})); err != nil {
 		return err
 	}
 
 	time.Sleep(time.Duration(seconds) * time.Second)
 
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Unfrozen after %d seconds", emojiCheck, seconds))
+		sf(m.k, "tester", "freezing_done", map[string]interface{}{
+			"check":   emojiCheck,
+			"seconds": seconds,
+		}))
 }
 
 // ---------- .teaser ----------
@@ -397,7 +416,7 @@ func (m *testerModule) cmdTeaser(ctx context.Context, ev *events.NewMessage) err
 	args := m.parseArgs(ev)
 	if len(args) == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf(`❌ <b>Specify a command to test</b>, example: <code>%steaser ping</code>`, prefix))
+			sf(m.k, "tester", "teaser_no_cmd", map[string]interface{}{"prefix": prefix}))
 	}
 
 	cmdName := args[0]
@@ -405,7 +424,7 @@ func (m *testerModule) cmdTeaser(ctx context.Context, ev *events.NewMessage) err
 	handler, exists := m.k.CommandHandlers[cmdName]
 	if !exists {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf(`❌ <b>Command</b> <code>%s</code> <b>not found</b>`, cmdName))
+			sf(m.k, "tester", "teaser_cmd_not_found", map[string]interface{}{"cmd": cmdName}))
 	}
 
 	logPath := m.kernelLogPath()
@@ -415,14 +434,13 @@ func (m *testerModule) cmdTeaser(ctx context.Context, ev *events.NewMessage) err
 	}
 
 	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf(`🎥 Recording <code>%s</code> execution...`, cmdName)); err != nil {
+		sf(m.k, "tester", "teaser_recording", map[string]interface{}{"cmd": cmdName})); err != nil {
 		return err
 	}
 
 	// Build a fake event pointing to the sub-command.
 	fakeEv := &events.NewMessage{}
 	*fakeEv = *ev
-	// Override text to make the sub-command parseable.
 	rawText := strings.Join(args, " ")
 	fakeEv.Raw = ev.Raw // keep same message ID for edits
 
@@ -444,15 +462,14 @@ func (m *testerModule) cmdTeaser(ctx context.Context, ev *events.NewMessage) err
 		f.Close()
 	}
 
-	report := fmt.Sprintf("<b>📊 Teaser Report:</b> <code>%s</code>\n\n", rawText)
+	report := sf(m.k, "tester", "teaser_report_header", map[string]interface{}{"cmd": rawText})
 	if newEntries != "" {
-		report += fmt.Sprintf("<b>📝 Kernel Log:</b>\n<blockquote expandable>%s</blockquote>", newEntries)
+		report += sf(m.k, "tester", "teaser_kernel_log", map[string]interface{}{"log": newEntries})
 	} else {
-		report += "<b>No kernel log entries recorded</b>"
+		report += s(m.k, "tester", "teaser_empty_log")
 	}
 
-	// Send the full report; fall back to a short summary for very long outputs.
 	_ = report
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("✅ <b>Done!</b> <code>%s</code> execution recorded", rawText))
+		sf(m.k, "tester", "teaser_done", map[string]interface{}{"cmd": rawText}))
 }

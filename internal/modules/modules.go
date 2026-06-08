@@ -29,6 +29,25 @@ const (
 	defaultRepo = "https://raw.githubusercontent.com/hairpin01/MCUB-fork/main/modules"
 )
 
+// ---------------------------------------------------------------------------
+// Loader emoji constants (from loader.py CUSTOM_EMOJI dict / task spec)
+// ---------------------------------------------------------------------------
+
+const (
+	loaderEmojiLoading = "<tg-emoji emoji-id=\"5310041868191407556\">⏳</tg-emoji>"
+	loaderEmojiSuccess = "<tg-emoji emoji-id=\"5332654441508119011\">✅</tg-emoji>"
+	loaderEmojiError   = "<tg-emoji emoji-id=\"5388785832956016892\">❌</tg-emoji>"
+	loaderEmojiIdea    = "<tg-emoji emoji-id=\"5424905419286601547\">💡</tg-emoji>"
+	loaderEmojiFile    = "<tg-emoji emoji-id=\"5433653135799228968\">📁</tg-emoji>"
+	loaderEmojiCrystal = "<tg-emoji emoji-id=\"5361837567463399422\">🔮</tg-emoji>"
+	loaderEmojiAngel   = "<tg-emoji emoji-id=\"5420315771499551346\">😇</tg-emoji>"
+	loaderEmojiAuthor  = "<tg-emoji emoji-id=\"5373004843210251169\">🥞</tg-emoji>"
+	loaderEmojiBlock   = "<tg-emoji emoji-id=\"5767151002666929821\">🚫</tg-emoji>"
+	loaderEmojiCloud   = "<tg-emoji emoji-id=\"5321304062715517873\">☁️</tg-emoji>"
+	loaderEmojiWarning = "<tg-emoji emoji-id=\"5409235172979672859\">⚠️</tg-emoji>"
+	loaderEmojiDeps    = "<tg-emoji emoji-id=\"5328311576736833844\">🟠</tg-emoji>"
+)
+
 // loaderModule provides module-management commands ported from loader.py.
 type loaderModule struct {
 	k       *kernel.Kernel
@@ -275,19 +294,19 @@ func (m *loaderModule) cmdIload(ctx context.Context, ev *events.NewMessage) erro
 		return m.edit(ctx, ev, fmt.Sprintf("⚠️ Expected <code>.py</code> or <code>.zip</code>, got <code>%s</code>.", fileName))
 	}
 
-	_ = m.edit(ctx, ev, fmt.Sprintf("⏳ Downloading <code>%s</code>…", fileName))
+	_ = m.edit(ctx, ev, loaderEmojiLoading+" <b>Please wait...</b>\n"+loaderEmojiFile+" Downloading <code>"+fileName+"</code>…")
 
 	destDir := m.k.ModulesLoadedDir
 	if destDir == "" {
 		destDir = "modules_loaded"
 	}
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Cannot create modules directory: %v", err))
+		return m.edit(ctx, ev, loaderEmojiError+" Cannot create modules directory: <code>"+err.Error()+"</code>")
 	}
 
 	tmpPath := filepath.Join(destDir, fileName)
 	if err := m.downloadReplyFile(ctx, ev, tmpPath); err != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Download failed: %v", err))
+		return m.edit(ctx, ev, loaderEmojiError+" Download failed: <code>"+err.Error()+"</code>")
 	}
 
 	if ext == ".zip" {
@@ -298,22 +317,23 @@ func (m *loaderModule) cmdIload(ctx context.Context, ev *events.NewMessage) erro
 
 // loadArchive extracts zipPath and loads each .py module found inside.
 func (m *loaderModule) loadArchive(ctx context.Context, ev *events.NewMessage, zipPath, destDir string) error {
-	_ = m.edit(ctx, ev, "⏳ Extracting archive…")
+	_ = m.edit(ctx, ev, loaderEmojiLoading+" Extracting archive…")
 
 	result, err := loader.ExtractArchive(zipPath, destDir)
 	if err != nil {
 		_ = os.Remove(zipPath)
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Extraction failed: %v", err))
+		return m.edit(ctx, ev, loaderEmojiError+" Extraction failed: <code>"+err.Error()+"</code>")
 	}
 	_ = os.Remove(zipPath)
 
 	if len(result.Modules) == 0 {
-		return m.edit(ctx, ev, "⚠️ No <code>.py</code> modules found in archive.")
+		return m.edit(ctx, ev, loaderEmojiWarning+" No <code>.py</code> modules found in archive.")
 	}
 
 	var loaded []string
 	var failed []string
 	for _, mod := range result.Modules {
+		_ = m.edit(ctx, ev, loaderEmojiLoading+" Installing <code>"+mod.Name+"</code>…")
 		if err2 := m.k.Loader.LoadPyFile(mod.FilePath); err2 != nil {
 			failed = append(failed, fmt.Sprintf("%s (%v)", mod.Name, err2))
 		} else {
@@ -323,43 +343,66 @@ func (m *loaderModule) loadArchive(ctx context.Context, ev *events.NewMessage, z
 
 	var sb strings.Builder
 	if len(loaded) > 0 {
-		sb.WriteString(fmt.Sprintf("✅ Loaded from archive: %s", strings.Join(loaded, ", ")))
+		sb.WriteString(loaderEmojiSuccess + " Loaded from archive: " + strings.Join(loaded, ", "))
 	}
 	if len(failed) > 0 {
 		if sb.Len() > 0 {
 			sb.WriteByte('\n')
 		}
-		sb.WriteString(fmt.Sprintf("❌ Failed: %s", strings.Join(failed, "; ")))
+		sb.WriteString(loaderEmojiError + " Failed: " + strings.Join(failed, "; "))
 	}
 	return m.edit(ctx, ev, sb.String())
 }
 
-// loadPyFile loads a single .py file and reports the result.
+// loadPyFile loads a single .py file, checks for pip dependencies (already
+// handled by PyLoader.LoadPyFile), and reports the result using the
+// module_loaded langpack template.
 func (m *loaderModule) loadPyFile(ctx context.Context, ev *events.NewMessage, pyPath string) error {
-	_ = m.edit(ctx, ev, fmt.Sprintf("⏳ Loading <code>%s</code>…", filepath.Base(pyPath)))
+	baseName := filepath.Base(pyPath)
+	stem := strings.TrimSuffix(baseName, ".py")
 
-	if err := m.k.Loader.LoadPyFile(pyPath); err != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Load failed: %v", err))
+	// Check for # requires: lines in the source so we can show a deps message.
+	if srcBytes, readErr := os.ReadFile(pyPath); readErr == nil { // #nosec G304
+		pl := m.k.Loader.PyLoaderInstance()
+		if pl != nil {
+			if deps := pl.ParseRequires(string(srcBytes)); len(deps) > 0 {
+				_ = m.edit(ctx, ev,
+					loaderEmojiDeps+" <b>Installing dependencies:</b>\n<blockquote><code>"+
+						strings.Join(deps, "\n")+"</code></blockquote>")
+			}
+		}
 	}
 
-	// Detect what was loaded by checking newly registered module names.
-	stem := strings.TrimSuffix(filepath.Base(pyPath), ".py")
-	modName := stem // best guess; Python name may differ
+	_ = m.edit(ctx, ev, loaderEmojiLoading+" Installing <b>"+stem+"</b>…")
 
-	// Look up the newly loaded module in LoadedModules.
-	var cmdNames []string
-	if mod, ok := m.k.LoadedModules[modName]; ok {
-		for _, c := range mod.Commands() {
-			cmdNames = append(cmdNames, m.k.Prefix()+c.Name)
+	if err := m.k.Loader.LoadPyFile(pyPath); err != nil {
+		return m.edit(ctx, ev, loaderEmojiError+" Load failed: <code>"+err.Error()+"</code>")
+	}
+
+	// Build success message using the module_loaded template.
+	// Try to find the loaded module in LoadedModules by stem name.
+	var cmdLines []string
+	modName := stem
+	for name, mod := range m.k.LoadedModules {
+		if strings.EqualFold(name, stem) || strings.EqualFold(strings.TrimPrefix(name, "userbot-"), stem) {
+			modName = name
+			for _, c := range mod.Commands() {
+				cmdLines = append(cmdLines, m.k.Prefix()+c.Name+" — "+c.Description)
+			}
+			break
 		}
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("✅ Module <b>%s</b> loaded.", modName))
-	if len(cmdNames) > 0 {
-		sb.WriteString("\nCommands: ")
-		sb.WriteString(strings.Join(cmdNames, ", "))
+	// {success} <b>Module</b> <code>{module_name}</code> <b>loaded!</b>
+	sb.WriteString(loaderEmojiSuccess + " <b>Module</b> <code>" + modName + "</code> <b>loaded!</b> " + loaderEmojiCrystal)
+
+	if len(cmdLines) > 0 {
+		sb.WriteString("\n<blockquote>" + loaderEmojiIdea + " <b>Commands:</b>\n")
+		sb.WriteString(strings.Join(cmdLines, "\n"))
+		sb.WriteString("</blockquote>")
 	}
+
 	return m.edit(ctx, ev, sb.String())
 }
 
@@ -404,25 +447,31 @@ func (m *loaderModule) cmdDlm(ctx context.Context, ev *events.NewMessage) error 
 
 // cmdDlmList fetches and shows module lists from all repos.
 func (m *loaderModule) cmdDlmList(ctx context.Context, ev *events.NewMessage, filter string) error {
-	_ = m.edit(ctx, ev, "⏳ Fetching module lists…")
+	_ = m.edit(ctx, ev, loaderEmojiLoading+" Fetching module lists…")
 
 	repos := m.allRepoURLs()
 	var sb strings.Builder
-	sb.WriteString("<b>Available modules:</b>\n")
+	sb.WriteString(loaderEmojiCloud + " <b>Available modules:</b>\n")
 
 	for i, repoURL := range repos {
 		mods, err := m.repoMgr.GetModuleList(ctx, repoURL)
-		repoLabel := fmt.Sprintf("[%d] %s", i, repoURL)
+		repoLabel := fmt.Sprintf("[%d] <code>%s</code>", i, repoURL)
 		if err != nil {
-			sb.WriteString(fmt.Sprintf("\n%s — ❌ %v\n", repoLabel, err))
+			sb.WriteString("\n" + repoLabel + " — " + loaderEmojiError + " " + err.Error() + "\n")
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("\n%s (%d modules):\n", repoLabel, len(mods)))
+		count := 0
+		for _, mod := range mods {
+			if filter == "" || strings.Contains(strings.ToLower(mod), strings.ToLower(filter)) {
+				count++
+			}
+		}
+		sb.WriteString(fmt.Sprintf("\n"+loaderEmojiFile+" %s (%d modules):\n", repoLabel, count))
 		for _, mod := range mods {
 			if filter != "" && !strings.Contains(strings.ToLower(mod), strings.ToLower(filter)) {
 				continue
 			}
-			sb.WriteString(fmt.Sprintf("  • %s\n", mod))
+			sb.WriteString("  • <code>" + mod + "</code>\n")
 		}
 	}
 	return m.edit(ctx, ev, sb.String())
@@ -430,25 +479,25 @@ func (m *loaderModule) cmdDlmList(ctx context.Context, ev *events.NewMessage, fi
 
 // cmdDlmSend downloads a module from a repo and sends it to chat without installing.
 func (m *loaderModule) cmdDlmSend(ctx context.Context, ev *events.NewMessage, name string) error {
-	_ = m.edit(ctx, ev, fmt.Sprintf("⏳ Fetching <code>%s</code>…", name))
+	_ = m.edit(ctx, ev, loaderEmojiLoading+" Fetching <code>"+name+"</code>…")
 
 	code, repoURL, err := m.downloadFromRepos(ctx, name)
 	if err != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Module <code>%s</code> not found in repos: %v", name, err))
+		return m.edit(ctx, ev, loaderEmojiError+" Module <code>"+name+"</code> not found in repos: "+err.Error())
 	}
 	_ = repoURL
 
 	tmpPath := filepath.Join(os.TempDir(), name+".py")
 	if err2 := os.WriteFile(tmpPath, []byte(code), 0o644); err2 != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Write tmp file: %v", err2))
+		return m.edit(ctx, ev, loaderEmojiError+" Write tmp file: "+err2.Error())
 	}
 	defer os.Remove(tmpPath)
 
-	_ = m.edit(ctx, ev, fmt.Sprintf("📤 Sending <code>%s.py</code>…", name))
+	_ = m.edit(ctx, ev, loaderEmojiFile+" Sending <code>"+name+".py</code>…")
 	if _, err2 := m.k.Client.SendDocument(ctx, ev.PeerID, tmpPath, name+".py"); err2 != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Send failed: %v", err2))
+		return m.edit(ctx, ev, loaderEmojiError+" Send failed: "+err2.Error())
 	}
-	return m.edit(ctx, ev, fmt.Sprintf("✅ Sent <code>%s.py</code>.", name))
+	return m.edit(ctx, ev, loaderEmojiSuccess+" Sent <code>"+name+".py</code>.")
 }
 
 // cmdDlmInstall downloads a module from a repo (or URL) and installs it.
@@ -458,25 +507,25 @@ func (m *loaderModule) cmdDlmInstall(ctx context.Context, ev *events.NewMessage,
 		destDir = "modules_loaded"
 	}
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Cannot create modules directory: %v", err))
+		return m.edit(ctx, ev, loaderEmojiError+" Cannot create modules directory: "+err.Error())
 	}
 
 	if isURL(target) {
-		_ = m.edit(ctx, ev, fmt.Sprintf("⏳ Downloading from URL…"))
+		_ = m.edit(ctx, ev, loaderEmojiLoading+" Downloading from URL…")
 		return m.installFromURL(ctx, ev, target, destDir)
 	}
 
-	_ = m.edit(ctx, ev, fmt.Sprintf("⏳ Searching repos for <code>%s</code>…", target))
+	_ = m.edit(ctx, ev, loaderEmojiLoading+" Searching repos for <code>"+target+"</code>…")
 
 	code, repoURL, err := m.downloadFromRepos(ctx, target)
 	if err != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Module <code>%s</code> not found: %v", target, err))
+		return m.edit(ctx, ev, loaderEmojiError+" Module <code>"+target+"</code> not found: "+err.Error())
 	}
 	_ = repoURL
 
 	pyPath := filepath.Join(destDir, target+".py")
 	if err2 := os.WriteFile(pyPath, []byte(code), 0o644); err2 != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Write module file: %v", err2))
+		return m.edit(ctx, ev, loaderEmojiError+" Write module file: "+err2.Error())
 	}
 
 	return m.loadPyFile(ctx, ev, pyPath)
@@ -486,19 +535,19 @@ func (m *loaderModule) cmdDlmInstall(ctx context.Context, ev *events.NewMessage,
 func (m *loaderModule) installFromURL(ctx context.Context, ev *events.NewMessage, rawURL, destDir string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Build request: %v", err))
+		return m.edit(ctx, ev, loaderEmojiError+" Build request: "+err.Error())
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Download: %v", err))
+		return m.edit(ctx, ev, loaderEmojiError+" Download: "+err.Error())
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ HTTP %d from URL.", resp.StatusCode))
+		return m.edit(ctx, ev, fmt.Sprintf(loaderEmojiError+" HTTP %d from URL.", resp.StatusCode))
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Read body: %v", err))
+		return m.edit(ctx, ev, loaderEmojiError+" Read body: "+err.Error())
 	}
 
 	base := filepath.Base(rawURL)
@@ -507,7 +556,7 @@ func (m *loaderModule) installFromURL(ctx context.Context, ev *events.NewMessage
 	}
 	pyPath := filepath.Join(destDir, base)
 	if err2 := os.WriteFile(pyPath, data, 0o644); err2 != nil {
-		return m.edit(ctx, ev, fmt.Sprintf("❌ Write module file: %v", err2))
+		return m.edit(ctx, ev, loaderEmojiError+" Write module file: "+err2.Error())
 	}
 	return m.loadPyFile(ctx, ev, pyPath)
 }

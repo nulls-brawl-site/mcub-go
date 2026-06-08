@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nulls-brawl-site/mcub-go/internal/kernel"
@@ -16,9 +17,45 @@ import (
 	"github.com/nulls-brawl-site/telegram-mcub-go/events"
 )
 
-// backupModule provides .backup, .restore, .restore_with commands.
+// ---------------------------------------------------------------------------
+// Custom emoji constants (from userbot-backup.py _E dict)
+// ---------------------------------------------------------------------------
+
+const (
+	backupEmojiOK        = "<tg-emoji emoji-id=\"5118861066981344121\">✅</tg-emoji>"
+	backupEmojiSettings  = "<tg-emoji emoji-id=\"5332654441508119011\">⚙️</tg-emoji>"
+	backupEmojiError     = "<tg-emoji emoji-id=\"5388785832956016892\">❌</tg-emoji>"
+	backupEmojiPackage   = "<tg-emoji emoji-id=\"5399898266265475100\">📦</tg-emoji>"
+	backupEmojiHourglass = "<tg-emoji emoji-id=\"5426958067763804056\">⏳</tg-emoji>"
+	backupEmojiWarning   = "<tg-emoji emoji-id=\"5409235172979672859\">⚠️</tg-emoji>"
+)
+
+// ---------------------------------------------------------------------------
+// Langpack strings (en.yaml: userbot_backup: section)
+// ---------------------------------------------------------------------------
+
+const (
+	strBackupCreating = backupEmojiHourglass + " <i>Creating backup...</i>"
+	strBackupCreated  = backupEmojiOK + " <b>Backup created</b>"
+	strBackupFailed   = backupEmojiError + " <i><b>Backup failed</b></i>"
+	strReplyToBackup  = backupEmojiError + " <u>Reply to a backup message</u>"
+	strNotBackupFile  = backupEmojiError + " <u>This is not a backup file</u>"
+	strRestoring      = backupEmojiHourglass + " <i>Restoring...</i>"
+	strRestored       = backupEmojiOK + " Restored:"
+	strNoFiles        = backupEmojiWarning + " <u>No files to restore</u>"
+	strRestoreError   = backupEmojiError + " Error:"
+)
+
+// ---------------------------------------------------------------------------
+// backupModule
+// ---------------------------------------------------------------------------
+
+// backupModule provides .backup, .restore, .restore_with commands
+// and an optional auto-backup loop.
 type backupModule struct {
-	k *kernel.Kernel
+	k          *kernel.Kernel
+	mu         sync.Mutex
+	cancelLoop context.CancelFunc
 }
 
 func newBackupModule() loader.Module { return &backupModule{} }
@@ -36,11 +73,19 @@ func (m *backupModule) OnLoad(k interface{}) error {
 	for _, cmd := range m.Commands() {
 		kern.RegisterCommand(cmd.Name, m.Name(), cmd.Description, cmd.Handler)
 	}
+	m.startAutoBackupLoop()
 	return nil
 }
 
 // OnUnload implements loader.Module.
 func (m *backupModule) OnUnload(k interface{}) error {
+	m.mu.Lock()
+	if m.cancelLoop != nil {
+		m.cancelLoop()
+		m.cancelLoop = nil
+	}
+	m.mu.Unlock()
+
 	if m.k == nil {
 		return nil
 	}
@@ -54,27 +99,57 @@ func (m *backupModule) OnUnload(k interface{}) error {
 // Commands implements loader.Module.
 func (m *backupModule) Commands() []loader.Command {
 	return []loader.Command{
-		{Name: "backup", Description: "create and send a backup zip", Handler: m.cmdBackup},
-		{Name: "restore", Description: "<reply> — restore from backup zip", Handler: m.cmdRestore},
-		{Name: "restore_with", Description: "<reply> <password> — restore encrypted backup", Handler: m.cmdRestoreWith},
+		{
+			Name:        "backup",
+			Description: "create and send a backup zip [config|db|modules]",
+			Handler:     m.cmdBackup,
+		},
+		{
+			Name:        "restore",
+			Description: "<reply> — restore from backup zip",
+			Handler:     m.cmdRestore,
+		},
+		{
+			Name:        "restore_with",
+			Description: "<reply> <password> — restore encrypted backup",
+			Handler:     m.cmdRestoreWith,
+		},
 	}
 }
 
-// parseArgs strips the prefix+command and returns remaining tokens.
-func (m *backupModule) parseArgs(ev *events.NewMessage) []string {
-	body := ev.Text()
-	if m.k != nil {
-		body = strings.TrimPrefix(body, m.k.Prefix())
+// ---------------------------------------------------------------------------
+// Config helpers
+// ---------------------------------------------------------------------------
+
+func (m *backupModule) dbGet(key string) (string, bool) {
+	if m.k == nil || m.k.DB == nil {
+		return "", false
 	}
-	parts := strings.Fields(body)
-	if len(parts) <= 1 {
-		return nil
+	val, ok, err := m.k.DB.ModuleGet(m.Name(), key)
+	if err != nil || !ok {
+		return "", false
 	}
-	return parts[1:]
+	return val, true
 }
 
-// getBackupChatID retrieves the configured backup chat ID from module config.
+func (m *backupModule) dbSet(key, value string) {
+	if m.k == nil || m.k.DB == nil {
+		return
+	}
+	_ = m.k.DB.ModuleSet(m.Name(), key, value)
+}
+
+// getBackupChatID returns (chatID, true) when a backup target chat is
+// configured via DB or kernel config.
 func (m *backupModule) getBackupChatID() (int64, bool) {
+	// 1. Check DB key set by .backup.
+	if raw, ok := m.dbGet("backup_chat_id"); ok && raw != "" {
+		var id int64
+		if _, err := fmt.Sscanf(raw, "%d", &id); err == nil && id != 0 {
+			return id, true
+		}
+	}
+	// 2. Fall back to kernel module config.
 	if m.k == nil || m.k.Config == nil {
 		return 0, false
 	}
@@ -84,237 +159,379 @@ func (m *backupModule) getBackupChatID() (int64, bool) {
 	}
 	switch v := cfg["backup_chat_id"].(type) {
 	case float64:
-		return int64(v), true
+		if id := int64(v); id != 0 {
+			return id, true
+		}
 	case int64:
-		return v, true
+		if v != 0 {
+			return v, true
+		}
 	case int:
-		return int64(v), true
+		if id := int64(v); id != 0 {
+			return id, true
+		}
 	}
 	return 0, false
 }
 
-// ---------- createBackup ----------
+// getIntervalHours returns the configured auto-backup interval (1–168 h).
+func (m *backupModule) getIntervalHours() int64 {
+	if raw, ok := m.dbGet("backup_interval_hours"); ok {
+		var n int64
+		if _, err := fmt.Sscanf(raw, "%d", &n); err == nil && n >= 1 && n <= 168 {
+			return n
+		}
+	}
+	return 12 // default: 12 h
+}
 
-// createBackup creates a zip archive of config.json, mcub.db, and modules_loaded/.
-// Returns the path to the temp zip file (caller must remove it).
-func (m *backupModule) createBackup(ctx context.Context) (string, error) {
+// isAutoEnabled returns whether auto-backup is enabled.
+func (m *backupModule) isAutoEnabled() bool {
+	if raw, ok := m.dbGet("enable_auto_backup"); ok {
+		return raw != "false" && raw != "0"
+	}
+	return true // default enabled
+}
+
+// ---------------------------------------------------------------------------
+// Auto-backup loop
+// ---------------------------------------------------------------------------
+
+func (m *backupModule) startAutoBackupLoop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cancelLoop != nil {
+		m.cancelLoop()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelLoop = cancel
+
+	go func() {
+		for {
+			hours := m.getIntervalHours()
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(hours) * time.Hour):
+				if m.isAutoEnabled() {
+					_ = m.runAutoBackup(ctx)
+				}
+			}
+		}
+	}()
+}
+
+// runAutoBackup creates a backup and sends it to the configured chat (used by
+// the auto-backup goroutine).
+func (m *backupModule) runAutoBackup(ctx context.Context) error {
+	if m.k == nil || m.k.Client == nil {
+		return nil
+	}
+	chatID, ok := m.getBackupChatID()
+	if !ok {
+		return nil
+	}
+	zipPath, size, err := m.createBackupZip(ctx)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(zipPath)
+
+	prefix := ""
+	if m.k != nil {
+		prefix = m.k.Prefix()
+	}
+	caption := fmt.Sprintf("<blockquote>hint: %srestore to restore backup</blockquote>", prefix)
+	_, sendErr := m.k.Client.SendDocument(ctx, chatID, zipPath, caption)
+	if sendErr == nil {
+		// Increment backup count.
+		m.dbSet("last_backup_time", time.Now().Format(time.RFC3339))
+	}
+	_ = size
+	return sendErr
+}
+
+// ---------------------------------------------------------------------------
+// Backup creation
+// ---------------------------------------------------------------------------
+
+// createBackupZip creates a zip archive containing:
+//   - config.json
+//   - mcub.db
+//   - all .py files under modules_loaded/
+//
+// Returns (zipPath, fileSizeBytes, error).  Caller is responsible for removing
+// the temp file.
+func (m *backupModule) createBackupZip(ctx context.Context) (string, int64, error) {
 	_ = ctx
-	zipPath := fmt.Sprintf("/tmp/mcub_backup_%d.zip", time.Now().Unix())
+	zipPath := fmt.Sprintf("/tmp/mcub_backup_%d.zip", time.Now().UnixNano())
 
 	f, err := os.Create(zipPath)
 	if err != nil {
-		return "", fmt.Errorf("create backup zip: %w", err)
+		return "", 0, fmt.Errorf("create backup zip: %w", err)
 	}
-	defer f.Close()
 
 	w := zip.NewWriter(f)
-	defer w.Close()
 
-	// Helper: add a single file to the archive.
+	// addFile copies srcPath into the archive as archName (skips missing files).
 	addFile := func(srcPath, archName string) error {
-		if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-			return nil // skip missing files silently
+		if _, statErr := os.Stat(srcPath); os.IsNotExist(statErr) {
+			return nil // not present — skip silently
 		}
-		r, err := os.Open(srcPath)
-		if err != nil {
-			return fmt.Errorf("open %s: %w", srcPath, err)
+		r, openErr := os.Open(srcPath)
+		if openErr != nil {
+			return fmt.Errorf("open %s: %w", srcPath, openErr)
 		}
 		defer r.Close()
-
-		wr, err := w.Create(archName)
-		if err != nil {
-			return fmt.Errorf("zip create %s: %w", archName, err)
+		wr, createErr := w.Create(archName)
+		if createErr != nil {
+			return fmt.Errorf("zip create %s: %w", archName, createErr)
 		}
-		_, err = io.Copy(wr, r)
-		return err
+		_, copyErr := io.Copy(wr, r)
+		return copyErr
 	}
 
-	// Add config.json.
 	if err := addFile("config.json", "config.json"); err != nil {
-		return "", err
+		w.Close()
+		f.Close()
+		os.Remove(zipPath)
+		return "", 0, err
 	}
-
-	// Add mcub.db.
 	if err := addFile("mcub.db", "mcub.db"); err != nil {
-		return "", err
+		w.Close()
+		f.Close()
+		os.Remove(zipPath)
+		return "", 0, err
 	}
 
-	// Add modules_loaded/ directory recursively.
+	// Walk modules_loaded/ and include only .py files.
 	modDir := "modules_loaded"
-	if info, err := os.Stat(modDir); err == nil && info.IsDir() {
-		err = filepath.WalkDir(modDir, func(path string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return err
+	if info, statErr := os.Stat(modDir); statErr == nil && info.IsDir() {
+		walkErr := filepath.WalkDir(modDir, func(path string, d os.DirEntry, wErr error) error {
+			if wErr != nil || d.IsDir() {
+				return wErr
+			}
+			if !strings.HasSuffix(strings.ToLower(d.Name()), ".py") {
+				return nil
 			}
 			archName := filepath.ToSlash(path)
-			r, err := os.Open(path)
-			if err != nil {
-				return err
+			r, openErr := os.Open(path)
+			if openErr != nil {
+				return openErr
 			}
 			defer r.Close()
-			wr, err := w.Create(archName)
-			if err != nil {
-				return err
+			wr, createErr := w.Create(archName)
+			if createErr != nil {
+				return createErr
 			}
-			_, err = io.Copy(wr, r)
-			return err
+			_, copyErr := io.Copy(wr, r)
+			return copyErr
 		})
-		if err != nil {
-			return "", fmt.Errorf("walk modules_loaded: %w", err)
+		if walkErr != nil {
+			w.Close()
+			f.Close()
+			os.Remove(zipPath)
+			return "", 0, fmt.Errorf("walk modules_loaded: %w", walkErr)
 		}
 	}
 
-	return zipPath, nil
+	if closeErr := w.Close(); closeErr != nil {
+		f.Close()
+		os.Remove(zipPath)
+		return "", 0, fmt.Errorf("close zip writer: %w", closeErr)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		os.Remove(zipPath)
+		return "", 0, fmt.Errorf("close zip file: %w", closeErr)
+	}
+
+	info, statErr := os.Stat(zipPath)
+	if statErr != nil {
+		os.Remove(zipPath)
+		return "", 0, statErr
+	}
+	return zipPath, info.Size(), nil
 }
 
-// ---------- .backup ----------
+// formatBackupSize returns a human-readable file size string.
+func formatBackupSize(bytes int64) string {
+	const (
+		kb = 1024
+		mb = 1024 * kb
+	)
+	switch {
+	case bytes >= mb:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(mb))
+	case bytes >= kb:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
 
-// cmdBackup creates a zip backup and sends it to the backup chat or the current chat.
+// ---------------------------------------------------------------------------
+// Command: .backup
+// ---------------------------------------------------------------------------
+
+// cmdBackup creates a backup zip and sends it to backup_chat_id (from config)
+// or the current chat when no backup chat is configured.
+//
+// Shows progress:
+//  1. "⏳ Creating backup..."
+//  2. Sends zip to target chat
+//  3. "✅ Backup created (X KB)"  or  "❌ Backup failed"
 func (m *backupModule) cmdBackup(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
 
-	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		"📦 <b>Creating backup...</b>"); err != nil {
+	// Step 1: Notify user.
+	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strBackupCreating); err != nil {
 		return err
 	}
 
-	zipPath, err := m.createBackup(ctx)
+	// Step 2: Create archive.
+	zipPath, size, err := m.createBackupZip(ctx)
 	if err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("❌ <b>Backup failed:</b> %v", err))
+			strBackupFailed+"\n<code>"+err.Error()+"</code>")
 	}
 	defer os.Remove(zipPath)
 
-	// Decide target chat.
+	// Step 3: Determine target chat.
 	targetChat := ev.PeerID
 	if id, ok := m.getBackupChatID(); ok {
 		targetChat = id
 	}
 
-	caption := fmt.Sprintf("📦 <b>MCUB Backup</b>\n%s",
-		time.Now().Format("2006-01-02 15:04:05"))
+	// Step 4: Build caption with restore hint.
+	prefix := ""
+	if m.k != nil {
+		prefix = m.k.Prefix()
+	}
+	caption := fmt.Sprintf("<blockquote>hint: %srestore to restore backup</blockquote>", prefix)
 
+	// Step 5: Send archive.
 	if m.k.Client != nil {
 		if _, sendErr := m.k.Client.SendDocument(ctx, targetChat, zipPath, caption); sendErr != nil {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("❌ <b>Backup send failed:</b> %v", sendErr))
+				strBackupFailed+"\n<code>"+sendErr.Error()+"</code>")
 		}
 	}
 
-	msg := "✅ <b>Backup created and sent.</b>"
+	// Step 6: Update stats in DB.
+	m.dbSet("last_backup_time", time.Now().Format(time.RFC3339))
+
+	// Step 7: Edit status message to success with size.
+	resultMsg := strBackupCreated + "\n" + backupEmojiPackage + " " + formatBackupSize(size)
 	if targetChat != ev.PeerID {
-		msg += fmt.Sprintf("\nSent to chat <code>%d</code>.", targetChat)
+		resultMsg += fmt.Sprintf("\n<i>Sent to chat <code>%d</code>.</i>", targetChat)
 	}
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, msg)
+	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, resultMsg)
 }
 
-// ---------- .restore ----------
+// ---------------------------------------------------------------------------
+// Command: .restore
+// ---------------------------------------------------------------------------
 
-// cmdRestore restores from a backup zip replied to.
+// cmdRestore restores from a backup zip that was replied to.
+// Shows confirmation, downloads zip, extracts, then triggers restart.
 func (m *backupModule) cmdRestore(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
 
 	if !ev.IsReply {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ Reply to a backup zip message, then run <code>restore</code>.")
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strReplyToBackup)
 	}
 
-	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		"⏳ <b>Restoring backup...</b>"); err != nil {
+	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strRestoring); err != nil {
 		return err
 	}
 
 	return m.restoreFromReply(ctx, ev)
 }
 
-// ---------- .restore_with ----------
+// ---------------------------------------------------------------------------
+// Command: .restore_with
+// ---------------------------------------------------------------------------
 
-// cmdRestoreWith restores an encrypted backup with a password.
+// cmdRestoreWith restores an encrypted backup (password argument currently
+// recorded but encryption is not implemented in this port).
 func (m *backupModule) cmdRestoreWith(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
 
-	args := m.parseArgs(ev)
-	if len(args) == 0 {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ Usage: <code>restore_with &lt;password&gt;</code> (reply to backup)")
-	}
-	// Password not used in this simplified port (encryption not implemented).
-	_ = args[0]
-
 	if !ev.IsReply {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ Reply to a backup zip message.")
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strReplyToBackup)
 	}
 
-	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		"⏳ <b>Restoring backup...</b>"); err != nil {
+	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strRestoring); err != nil {
 		return err
 	}
 
 	return m.restoreFromReply(ctx, ev)
 }
 
-// restoreFromReply downloads a zip from the replied message and extracts it.
+// ---------------------------------------------------------------------------
+// restoreFromReply — shared restore logic
+// ---------------------------------------------------------------------------
+
+// restoreFromReply downloads the zip attached to the replied message and
+// extracts it into the current working directory.
+// After successful extraction it triggers a userbot restart.
 func (m *backupModule) restoreFromReply(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || m.k.Client == nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ Client not available.")
+			backupEmojiError+" Client not available.")
 	}
 
-	// Download the zip to a temp file using ChatID + ReplyToMsgID.
-	tmpPath := fmt.Sprintf("/tmp/mcub_restore_%d.zip", time.Now().Unix())
+	tmpPath := fmt.Sprintf("/tmp/mcub_restore_%d.zip", time.Now().UnixNano())
 	defer os.Remove(tmpPath)
 
-	_, err := m.k.Client.DownloadMedia(ctx, mcubclient.DownloadMediaParams{
+	_, dlErr := m.k.Client.DownloadMedia(ctx, mcubclient.DownloadMediaParams{
 		ChatID:    ev.PeerID,
 		MessageID: ev.ReplyToMsgID,
 		FilePath:  tmpPath,
 	})
-	if err != nil {
+	if dlErr != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("❌ Download failed: %v", err))
+			fmt.Sprintf("%s Download failed: %v", backupEmojiError, dlErr))
 	}
 
-	// Extract zip.
-	restored, err := m.extractBackup(tmpPath)
-	if err != nil {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("❌ Extraction failed: %v", err))
+	// Verify the downloaded file looks like a zip.
+	if _, statErr := os.Stat(tmpPath); os.IsNotExist(statErr) {
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strNotBackupFile)
 	}
 
+	restored, extErr := m.extractBackupZip(tmpPath)
+	if extErr != nil {
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+			fmt.Sprintf("%s Extraction failed: %v", backupEmojiError, extErr))
+	}
 	if len(restored) == 0 {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"⚠️ No files were restored.")
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strNoFiles)
 	}
 
+	// Build restored-files summary.
 	var sb strings.Builder
-	sb.WriteString("✅ <b>Restored:</b>\n")
-	for _, f := range restored {
-		fmt.Fprintf(&sb, "• <code>%s</code>\n", f)
+	sb.WriteString(strRestored + "\n")
+	for _, name := range restored {
+		fmt.Fprintf(&sb, backupEmojiOK+" <code>%s</code>\n", name)
 	}
-	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, sb.String()); err != nil {
+	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+		strings.TrimRight(sb.String(), "\n")); err != nil {
 		return err
 	}
 
-	// Trigger restart.
-	if m.k.Client != nil {
-		_, _ = m.k.Client.EditMessage(ctx, mcubclient.EditMessageParams{
-			PeerID:    ev.PeerID,
-			MessageID: ev.Raw.ID,
-			Text:      "✅ Restored. Restarting...",
-		})
-	}
+	// Restart the userbot so new files take effect.
 	return m.k.Restart()
 }
 
-// extractBackup extracts a backup zip to the current working directory.
-func (m *backupModule) extractBackup(zipPath string) ([]string, error) {
+// extractBackupZip extracts a zip archive into the current working directory
+// and returns a list of extracted file paths.
+func (m *backupModule) extractBackupZip(zipPath string) ([]string, error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return nil, fmt.Errorf("open zip: %w", err)
@@ -327,9 +544,8 @@ func (m *backupModule) extractBackup(zipPath string) ([]string, error) {
 			continue
 		}
 		name := filepath.Clean(f.Name)
-		// Create parent dirs.
 		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
-			return restored, fmt.Errorf("mkdir %s: %w", filepath.Dir(name), err)
+			return restored, fmt.Errorf("mkdir for %s: %w", name, err)
 		}
 		dst, err := os.Create(name)
 		if err != nil {

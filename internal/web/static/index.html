@@ -5,303 +5,513 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        *, *::before, *::after { box-sizing: border-box; }
-        body { background: #1a1a2e; color: #eee; font-family: 'Courier New', monospace; margin: 0; padding: 20px; }
-        a { color: #4a9eff; }
-        h2, h3 { margin-top: 0; }
-        .header { color: #4a9eff; font-size: 24px; font-weight: bold; margin-bottom: 20px; }
-        .card { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 16px; margin: 10px 0; }
-        .status-ok  { color: #4ade80; }
-        .status-err { color: #f87171; }
-        .status-warn { color: #facc15; }
-        button {
-            background: #0f3460; color: #eee; border: none;
-            padding: 8px 16px; border-radius: 4px; cursor: pointer;
-            margin: 4px 2px;
+        :root {
+            --bg: #0d1117;
+            --bg2: #161b22;
+            --bg3: #21262d;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text2: #8b949e;
+            --accent: #58a6ff;
+            --green: #3fb950;
+            --red: #f85149;
+            --yellow: #d29922;
         }
-        button:hover { background: #1a4a8a; }
-        button.danger { background: #7f1d1d; }
-        button.danger:hover { background: #991b1b; }
-        input[type=text], input[type=password] {
-            background: #0f3460; color: #eee; border: 1px solid #4a9eff;
-            padding: 6px 10px; border-radius: 4px; font-family: inherit; width: 100%;
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; }
+
+        /* Sidebar */
+        .sidebar { width: 240px; height: 100vh; background: var(--bg2); border-right: 1px solid var(--border); position: fixed; top: 0; left: 0; display: flex; flex-direction: column; padding: 16px; overflow-y: auto; }
+        .logo { font-size: 20px; font-weight: bold; color: var(--accent); margin-bottom: 24px; padding: 4px 0; }
+        .nav-item { padding: 8px 12px; border-radius: 6px; cursor: pointer; color: var(--text2); margin-bottom: 4px; font-size: 14px; transition: background 0.15s; }
+        .nav-item:hover { background: var(--bg3); color: var(--text); }
+        .nav-item.active { background: var(--bg3); color: var(--text); }
+
+        /* Main */
+        .main { margin-left: 240px; padding: 24px; min-height: 100vh; }
+        .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+        .page-header h2 { font-size: 20px; font-weight: 600; }
+
+        /* Cards */
+        .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+        .card-title { font-weight: 600; margin-bottom: 12px; color: var(--text); font-size: 15px; }
+
+        /* Status badges */
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
+        .badge-green { background: rgba(63,185,80,0.15); color: var(--green); }
+        .badge-yellow { background: rgba(210,153,34,0.15); color: var(--yellow); }
+        .badge-red { background: rgba(248,81,73,0.15); color: var(--red); }
+
+        /* Table */
         table { width: 100%; border-collapse: collapse; }
-        td, th { padding: 8px 10px; text-align: left; border-bottom: 1px solid #0f3460; }
-        th { color: #4a9eff; }
-        code { background: #0f3460; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
-        pre { background: #0f3460; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 0.85em; max-height: 300px; overflow-y: auto; }
-        #login-section { max-width: 360px; margin: 80px auto; }
-        #main-section { display: none; }
-        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; }
-        .badge-sys { background: #1e3a5f; color: #60a5fa; }
-        .badge-user { background: #1e3a1f; color: #4ade80; }
-        .row-flex { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-        #log-output { max-height: 260px; overflow-y: auto; }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; }
+        th { color: var(--text2); font-weight: normal; font-size: 13px; }
+        tr:last-child td { border-bottom: none; }
+        code { background: var(--bg3); padding: 2px 6px; border-radius: 4px; font-size: 13px; color: var(--accent); font-family: monospace; }
+
+        /* Buttons */
+        .btn { padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; transition: opacity 0.15s; }
+        .btn-primary { background: var(--accent); color: #0d1117; font-weight: 500; }
+        .btn-danger { background: var(--red); color: white; }
+        .btn-secondary { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+        .btn:hover { opacity: 0.85; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Forms */
+        input, textarea, select { background: var(--bg3); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 14px; outline: none; }
+        input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+        select option { background: var(--bg3); }
+
+        /* Log output */
+        .log-output { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px; line-height: 1.6; }
+        .log-info { color: var(--text2); }
+        .log-error { color: var(--red); }
+        .log-warn { color: var(--yellow); }
+
+        /* Login */
+        .login-wrap { display: flex; align-items: center; justify-content: center; height: 100vh; }
+        .login-card { width: 360px; }
+
+        /* Util */
+        .hidden { display: none !important; }
+        .flex { display: flex; }
+        .gap8 { gap: 8px; }
+        .gap12 { gap: 12px; }
+        .mt8 { margin-top: 8px; }
+        .mt12 { margin-top: 12px; }
+        .text2 { color: var(--text2); }
+        .small { font-size: 12px; }
+        .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .stat-label { color: var(--text2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+        .stat-value { font-size: 17px; font-weight: 600; }
     </style>
 </head>
 <body>
 
-<!-- ── Login ─────────────────────────────────────────────────────────────── -->
-<div id="login-section" class="card">
-    <div class="header">MCUB Panel</div>
-    <h3>Sign In</h3>
-    <div id="login-error" class="status-err" style="display:none;margin-bottom:10px;"></div>
-    <input type="password" id="pw-input" placeholder="Password" style="margin-bottom:10px;" onkeydown="if(event.key==='Enter')doLogin()">
-    <br>
-    <button onclick="doLogin()">Login</button>
-    <p style="color:#aaa;font-size:0.85em;">Leave blank if no password is set.</p>
+<!-- Login screen -->
+<div id="login" class="login-wrap">
+    <div class="card login-card">
+        <div class="card-title" style="font-size:18px; color:var(--accent)">MCUB Panel</div>
+        <div style="margin-bottom:12px;margin-top:16px;">
+            <input type="password" id="pwd" placeholder="Password" style="width:100%"
+                   onkeydown="if(event.key==='Enter')login()">
+        </div>
+        <button class="btn btn-primary" onclick="login()" style="width:100%">Login</button>
+        <div id="login-err" style="color:var(--red);margin-top:8px;font-size:13px"></div>
+    </div>
 </div>
 
-<!-- ── Main Panel ────────────────────────────────────────────────────────── -->
-<div id="main-section">
-    <div class="header">MCUB Panel</div>
+<!-- Main app (hidden until logged in) -->
+<div id="app" class="hidden">
+    <div class="sidebar">
+        <div class="logo">MCUB</div>
+        <div class="nav-item active" data-page="status" onclick="showPage('status')">Status</div>
+        <div class="nav-item" data-page="modules" onclick="showPage('modules')">Modules</div>
+        <div class="nav-item" data-page="config" onclick="showPage('config')">Config</div>
+        <div class="nav-item" data-page="aliases" onclick="showPage('aliases')">Aliases</div>
+        <div class="nav-item" data-page="repos" onclick="showPage('repos')">Repos</div>
+        <div class="nav-item" data-page="logs" onclick="showPage('logs')">Logs</div>
+        <div class="nav-item" data-page="terminal" onclick="showPage('terminal')">Terminal</div>
+        <div style="flex:1"></div>
+        <div class="nav-item" onclick="restart()" style="color:var(--yellow)">Restart</div>
+        <div class="nav-item" onclick="doStop()" style="color:var(--red)">Stop</div>
+        <div class="nav-item" onclick="logout()" style="color:var(--text2)">Logout</div>
+    </div>
 
-    <!-- Status card -->
-    <div class="card" id="status-card">
-        <div class="row-flex">
-            <span id="status-dot">&#9679;</span>
-            <span id="status-text">Loading...</span>
-            <button onclick="fetchStatus()">Refresh</button>
-            <button onclick="doLogout()" style="margin-left:auto;">Logout</button>
+    <div class="main">
+
+        <!-- Status page -->
+        <div id="page-status">
+            <div class="page-header">
+                <h2>Status</h2>
+                <span id="status-badge" class="badge badge-green">Online</span>
+            </div>
+            <div class="card" id="status-card">
+                <div class="stat-grid" id="status-grid">
+                    <div><div class="stat-label">Status</div><div class="stat-value" id="s-status">—</div></div>
+                    <div><div class="stat-label">Uptime</div><div class="stat-value" id="s-uptime">—</div></div>
+                    <div><div class="stat-label">Language</div><div class="stat-value" id="s-lang">—</div></div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-title">Quick Command</div>
+                <div class="flex gap8">
+                    <input id="cmd-input" placeholder="Enter command (e.g. .ping)" style="flex:1"
+                           onkeydown="if(event.key==='Enter')runCommand()">
+                    <button class="btn btn-primary" onclick="runCommand()">Run</button>
+                </div>
+                <div id="cmd-result" class="mt12" style="font-family:monospace;font-size:13px"></div>
+            </div>
         </div>
-    </div>
 
-    <!-- Modules -->
-    <div class="card">
-        <h3>Modules</h3>
-        <div id="modules-list">Loading...</div>
-        <div style="margin-top:10px;" class="row-flex">
-            <input type="text" id="load-path" placeholder="Path or URL to module" style="flex:1;">
-            <button onclick="loadModule()">Load</button>
+        <!-- Modules page -->
+        <div id="page-modules" class="hidden">
+            <div class="page-header">
+                <h2>Modules</h2>
+                <button class="btn btn-primary" onclick="showLoadModule()">+ Load Module</button>
+            </div>
+            <div class="card" id="modules-card">Loading...</div>
         </div>
-        <div id="load-result" style="margin-top:8px;font-size:0.9em;"></div>
-    </div>
 
-    <!-- Command runner -->
-    <div class="card">
-        <h3>Run Command</h3>
-        <div class="row-flex">
-            <input type="text" id="cmd-input" placeholder=".ping" style="flex:1;" onkeydown="if(event.key==='Enter')runCommand()">
-            <button onclick="runCommand()">Run</button>
+        <!-- Config page -->
+        <div id="page-config" class="hidden">
+            <div class="page-header"><h2>Config</h2></div>
+            <div class="card" id="config-card">Loading...</div>
         </div>
-        <pre id="cmd-result" style="margin-top:10px;display:none;"></pre>
-    </div>
 
-    <!-- Logs -->
-    <div class="card">
-        <h3>Recent Log</h3>
-        <pre id="log-output">Loading...</pre>
-        <button onclick="fetchLog()">Refresh</button>
-    </div>
+        <!-- Aliases page -->
+        <div id="page-aliases" class="hidden">
+            <div class="page-header">
+                <h2>Aliases</h2>
+                <button class="btn btn-primary" onclick="showAddAlias()">+ Add Alias</button>
+            </div>
+            <div class="card" id="aliases-card">Loading...</div>
+        </div>
 
-    <!-- Danger zone -->
-    <div class="card">
-        <h3>Actions</h3>
-        <button class="danger" onclick="doRestart()">Restart Kernel</button>
+        <!-- Repos page -->
+        <div id="page-repos" class="hidden">
+            <div class="page-header">
+                <h2>Repositories</h2>
+                <button class="btn btn-primary" onclick="showAddRepo()">+ Add Repo</button>
+            </div>
+            <div class="card" id="repos-card">Loading...</div>
+        </div>
+
+        <!-- Logs page -->
+        <div id="page-logs" class="hidden">
+            <div class="page-header">
+                <h2>Logs</h2>
+                <div class="flex gap8" style="align-items:center">
+                    <select id="log-level" onchange="fetchLogs()">
+                        <option value="all">all</option>
+                        <option value="debug">debug</option>
+                        <option value="info">info</option>
+                        <option value="warning">warning</option>
+                        <option value="error">error</option>
+                    </select>
+                    <button class="btn btn-secondary" onclick="fetchLogs()">Refresh</button>
+                </div>
+            </div>
+            <div class="log-output" id="log-output"></div>
+        </div>
+
+        <!-- Terminal page -->
+        <div id="page-terminal" class="hidden">
+            <div class="page-header"><h2>Terminal</h2></div>
+            <div class="card">
+                <div class="flex gap8" style="margin-bottom:12px">
+                    <input id="term-input" placeholder="Shell command" style="flex:1"
+                           onkeydown="if(event.key==='Enter')runTerminal()">
+                    <button class="btn btn-primary" onclick="runTerminal()">Run</button>
+                </div>
+                <div class="log-output" id="term-output"></div>
+            </div>
+        </div>
+
     </div>
 </div>
 
 <script>
 'use strict';
+const API = '/api';
+let token = localStorage.getItem('mcub_token') || '';
 
-// ── Auth helpers ──────────────────────────────────────────────────────────────
-function getToken() { return sessionStorage.getItem('mcub_token') || ''; }
-function setToken(t) { sessionStorage.setItem('mcub_token', t); }
-function clearToken() { sessionStorage.removeItem('mcub_token'); }
-
-function authHeaders() {
-    const tok = getToken();
-    return tok ? { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }
-               : { 'Content-Type': 'application/json' };
-}
-
-async function apiFetch(url, opts) {
-    opts = opts || {};
-    opts.headers = Object.assign(authHeaders(), opts.headers || {});
-    const r = await fetch(url, opts);
-    if (r.status === 401) { showLogin(); return null; }
-    return r.json();
-}
-
-// ── Login / Logout ────────────────────────────────────────────────────────────
-async function doLogin() {
-    const pw = document.getElementById('pw-input').value;
-    const r = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: pw })
-    });
-    const d = await r.json();
-    if (d.ok) {
-        setToken(d.result.token);
-        showMain();
-    } else {
-        const el = document.getElementById('login-error');
-        el.textContent = d.error || 'Login failed';
-        el.style.display = '';
+// ── HTTP helper ────────────────────────────────────────────────────────────────
+async function api(path, method, body) {
+    method = method || 'GET';
+    const opts = {
+        method,
+        headers: { 'Content-Type': 'application/json' }
+    };
+    if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+    if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
+    try {
+        const r = await fetch(API + path, opts);
+        if (r.status === 401) { showLogin(); return { ok: false, error: 'unauthorized' }; }
+        return await r.json();
+    } catch (e) {
+        return { ok: false, error: String(e) };
     }
 }
 
-function doLogout() {
-    clearToken();
+function esc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Auth ───────────────────────────────────────────────────────────────────────
+async function login() {
+    const pwd = document.getElementById('pwd').value;
+    const d = await api('/auth/login', 'POST', { password: pwd });
+    if (d.ok) {
+        token = d.result.token;
+        localStorage.setItem('mcub_token', token);
+        showApp();
+    } else {
+        document.getElementById('login-err').textContent = d.error || 'Login failed';
+    }
+}
+
+async function logout() {
+    await api('/auth/logout', 'POST');
+    token = '';
+    localStorage.removeItem('mcub_token');
     showLogin();
 }
 
-// ── View switching ────────────────────────────────────────────────────────────
 function showLogin() {
-    document.getElementById('login-section').style.display = '';
-    document.getElementById('main-section').style.display = 'none';
+    document.getElementById('login').classList.remove('hidden');
+    document.getElementById('app').classList.add('hidden');
 }
 
-function showMain() {
-    document.getElementById('login-section').style.display = 'none';
-    document.getElementById('main-section').style.display = '';
-    fetchStatus();
-    fetchModules();
-    fetchLog();
+async function checkAuth() {
+    const d = await api('/auth/status');
+    if (d.ok && d.result && d.result.authenticated) { showApp(); return true; }
+    return false;
 }
 
-// ── Status ────────────────────────────────────────────────────────────────────
-async function fetchStatus() {
-    const d = await apiFetch('/api/status');
-    if (!d) return;
-    const el = document.getElementById('status-text');
-    const dot = document.getElementById('status-dot');
-    if (d.ok) {
-        const r = d.result;
-        dot.style.color = '#4ade80';
-        el.innerHTML = `<span class="status-ok">Online</span>` +
-            (r.version ? ` | Version: <code>${r.version}</code>` : '') +
-            (r.uptime  ? ` | Uptime: <code>${r.uptime}</code>`   : '') +
-            (r.prefix  ? ` | Prefix: <code>${r.prefix}</code>`   : '') +
-            (r.status  ? ` | <code>${r.status}</code>`           : '');
-    } else {
-        dot.style.color = '#f87171';
-        el.innerHTML = `<span class="status-err">Error: ${d.error}</span>`;
-    }
-}
-
-// ── Modules ───────────────────────────────────────────────────────────────────
-async function fetchModules() {
-    const d = await apiFetch('/api/modules');
-    const el = document.getElementById('modules-list');
-    if (!d) return;
-    if (!d.ok) { el.textContent = 'Error: ' + d.error; return; }
-
-    const mods = d.result;
-    if (!mods || mods.length === 0) {
-        el.textContent = 'No modules loaded.';
-        return;
-    }
-
-    if (Array.isArray(mods) && typeof mods[0] === 'string') {
-        // simple string list
-        el.innerHTML = '<table><tr><th>Module</th><th></th></tr>' +
-            mods.map(name => `<tr><td><code>${esc(name)}</code></td><td>
-                <button onclick="unloadModule('${esc(name)}')">Unload</button></td></tr>`
-            ).join('') + '</table>';
-    } else if (Array.isArray(mods)) {
-        // rich objects with name/type/commands
-        el.innerHTML = '<table><tr><th>Module</th><th>Type</th><th>Commands</th><th></th></tr>' +
-            mods.map(m => `<tr>
-                <td><code>${esc(m.name)}</code></td>
-                <td><span class="badge badge-${m.type==='system'?'sys':'user'}">${esc(m.type||'')}</span></td>
-                <td>${(m.commands||[]).map(c=>`<code>${esc(c)}</code>`).join(' ')}</td>
-                <td><button onclick="unloadModule('${esc(m.name)}')">Unload</button></td>
-            </tr>`).join('') + '</table>';
-    }
-}
-
-async function loadModule() {
-    const path = document.getElementById('load-path').value.trim();
-    const res = document.getElementById('load-result');
-    if (!path) { res.innerHTML = '<span class="status-warn">Enter a path or URL.</span>'; return; }
-    const d = await apiFetch('/api/modules/load', {
-        method: 'POST',
-        body: JSON.stringify({ path })
-    });
-    if (!d) return;
-    res.innerHTML = d.ok
-        ? `<span class="status-ok">Loaded: ${esc(path)}</span>`
-        : `<span class="status-err">Error: ${esc(d.error)}</span>`;
-    if (d.ok) fetchModules();
-}
-
-async function unloadModule(name) {
-    const d = await apiFetch('/api/modules/unload', {
-        method: 'POST',
-        body: JSON.stringify({ name })
-    });
-    if (!d) return;
-    if (!d.ok) alert('Error: ' + d.error);
-    fetchModules();
-}
-
-// ── Command ───────────────────────────────────────────────────────────────────
-async function runCommand() {
-    const cmd = document.getElementById('cmd-input').value.trim();
-    const out = document.getElementById('cmd-result');
-    if (!cmd) return;
-    const d = await apiFetch('/api/command', {
-        method: 'POST',
-        body: JSON.stringify({ command: cmd })
-    });
-    if (!d) return;
-    out.style.display = '';
-    out.textContent = d.ok ? (d.result.result || '(no output)') : ('Error: ' + d.error);
-}
-
-// ── Log ───────────────────────────────────────────────────────────────────────
-async function fetchLog() {
-    const d = await apiFetch('/api/log?n=100');
-    const el = document.getElementById('log-output');
-    if (!d) return;
-    if (!d.ok) { el.textContent = 'Error: ' + d.error; return; }
-    const lines = d.result;
-    el.textContent = Array.isArray(lines) ? lines.join('\n') : '(empty)';
-    el.scrollTop = el.scrollHeight;
-}
-
-// ── Restart ───────────────────────────────────────────────────────────────────
-async function doRestart() {
-    if (!confirm('Restart the kernel now?')) return;
-    const d = await apiFetch('/api/restart', { method: 'POST' });
-    if (!d) return;
-    alert(d.ok ? 'Restart scheduled.' : ('Error: ' + d.error));
-}
-
-// ── Utils ─────────────────────────────────────────────────────────────────────
-function esc(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-// ── Init ──────────────────────────────────────────────────────────────────────
+// ── App init ───────────────────────────────────────────────────────────────────
 (async function init() {
-    // Check if already authenticated
-    if (getToken()) {
-        const d = await fetch('/api/auth/status', { headers: authHeaders() }).then(r => r.json()).catch(() => null);
-        if (d && d.ok && d.result && d.result.authenticated) {
-            showMain();
-            return;
-        }
-        clearToken();
+    if (token) {
+        if (await checkAuth()) return;
+        token = '';
+        localStorage.removeItem('mcub_token');
     }
-    // If no password is required, try to access directly
-    const statusD = await fetch('/api/status').then(r => r.json()).catch(() => null);
-    if (statusD && statusD.ok) {
-        showMain();
-        return;
-    }
+    // No password configured? status accessible without auth
+    const s = await api('/status');
+    if (s.ok) { showApp(); return; }
     showLogin();
 })();
 
-// Auto-refresh status every 15 seconds
-setInterval(() => {
-    if (document.getElementById('main-section').style.display !== 'none') {
-        fetchStatus();
+function showApp() {
+    document.getElementById('login').classList.add('hidden');
+    document.getElementById('app').classList.remove('hidden');
+    showPage('status');
+}
+
+// ── Navigation ─────────────────────────────────────────────────────────────────
+const PAGE_LOADERS = {
+    status: loadStatus,
+    modules: loadModules,
+    config: loadConfig,
+    aliases: loadAliases,
+    repos: loadRepos,
+    logs: fetchLogs
+};
+
+function showPage(name) {
+    document.querySelectorAll('[id^="page-"]').forEach(p => p.classList.add('hidden'));
+    document.getElementById('page-' + name).classList.remove('hidden');
+    document.querySelectorAll('.nav-item[data-page]').forEach(n => {
+        n.classList.toggle('active', n.dataset.page === name);
+    });
+    if (PAGE_LOADERS[name]) PAGE_LOADERS[name]();
+}
+
+// ── Status ─────────────────────────────────────────────────────────────────────
+async function loadStatus() {
+    const [ds, di] = await Promise.all([api('/status'), api('/info')]);
+    const badge = document.getElementById('status-badge');
+
+    if (ds.ok) {
+        badge.textContent = 'Online';
+        badge.className = 'badge badge-green';
+        document.getElementById('s-status').textContent = ds.result.status || 'running';
+    } else {
+        badge.textContent = 'Error';
+        badge.className = 'badge badge-red';
     }
-}, 15000);
+
+    if (di.ok) {
+        const r = di.result;
+        const uptime = r.uptime ? fmtUptime(r.uptime) : '—';
+        document.getElementById('s-uptime').textContent = uptime;
+        document.getElementById('s-lang').textContent = r.language || '—';
+    }
+}
+
+function fmtUptime(sec) {
+    sec = Math.floor(sec);
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+function pad(n) { return String(n).padStart(2, '0'); }
+
+// ── Modules ────────────────────────────────────────────────────────────────────
+async function loadModules() {
+    const d = await api('/modules');
+    const el = document.getElementById('modules-card');
+    if (!d.ok) { el.innerHTML = `<span style="color:var(--red)">${esc(d.error)}</span>`; return; }
+    const mods = d.result || [];
+    if (!mods.length) { el.innerHTML = '<span class="text2">No modules loaded.</span>'; return; }
+
+    let html = '<table><tr><th>Name</th><th>Type</th><th>Commands</th><th></th></tr>';
+    for (const m of mods) {
+        if (typeof m === 'string') {
+            html += `<tr><td><b>${esc(m)}</b></td><td>—</td><td>—</td>
+                <td><button class="btn btn-danger" onclick="unloadModule('${esc(m)}')" style="padding:3px 8px;font-size:12px">Unload</button></td></tr>`;
+        } else {
+            const cmds = (m.commands || []).slice(0,5).map(c => `<code>${esc(c)}</code>`).join(' ');
+            const more = (m.commands||[]).length > 5 ? ` <span class="text2 small">+${(m.commands||[]).length-5}</span>` : '';
+            const isSystem = m.type === 'system';
+            html += `<tr>
+                <td><b>${esc(m.name)}</b></td>
+                <td><span class="badge ${isSystem ? 'badge-yellow' : 'badge-green'}">${esc(m.type||'user')}</span></td>
+                <td>${cmds}${more}</td>
+                <td>${isSystem ? '' : `<button class="btn btn-danger" onclick="unloadModule('${esc(m.name)}')" style="padding:3px 8px;font-size:12px">Unload</button>`}</td>
+            </tr>`;
+        }
+    }
+    html += '</table>';
+    el.innerHTML = html;
+}
+
+async function unloadModule(name) {
+    if (!confirm(`Unload module "${name}"?`)) return;
+    const d = await api('/modules/unload', 'POST', { name });
+    if (d.ok) loadModules(); else alert('Error: ' + d.error);
+}
+
+function showLoadModule() {
+    const url = prompt('Module path or URL:');
+    if (!url) return;
+    api('/modules/load', 'POST', { path: url }).then(d => {
+        if (d.ok) loadModules(); else alert('Error: ' + d.error);
+    });
+}
+
+// ── Config ─────────────────────────────────────────────────────────────────────
+async function loadConfig() {
+    const d = await api('/config');
+    const el = document.getElementById('config-card');
+    if (!d.ok) { el.innerHTML = `<span style="color:var(--red)">${esc(d.error)}</span>`; return; }
+    const r = d.result || {};
+    let html = '<table>';
+    for (const [k, v] of Object.entries(r)) {
+        html += `<tr><td style="color:var(--text2);width:200px;font-size:13px">${esc(k)}</td><td><code>${esc(JSON.stringify(v))}</code></td></tr>`;
+    }
+    if (!Object.keys(r).length) html += '<tr><td colspan="2" class="text2">No config available.</td></tr>';
+    html += '</table>';
+    el.innerHTML = html;
+}
+
+// ── Aliases ────────────────────────────────────────────────────────────────────
+async function loadAliases() {
+    const d = await api('/aliases');
+    const el = document.getElementById('aliases-card');
+    if (!d.ok) { el.innerHTML = `<span style="color:var(--red)">${esc(d.error)}</span>`; return; }
+    const aliases = d.result || {};
+    let html = '<table><tr><th>Alias</th><th>Command</th><th></th></tr>';
+    const entries = Object.entries(aliases);
+    for (const [a, c] of entries) {
+        html += `<tr><td><code>${esc(a)}</code></td><td><code>${esc(c)}</code></td>
+            <td><button class="btn btn-danger" onclick="deleteAlias('${esc(a)}')" style="padding:3px 8px;font-size:12px">Remove</button></td></tr>`;
+    }
+    if (!entries.length) html += '<tr><td colspan="3" class="text2">No aliases defined.</td></tr>';
+    html += '</table>';
+    el.innerHTML = html;
+}
+
+function showAddAlias() {
+    const alias = prompt('Alias name (without prefix):');
+    if (!alias) return;
+    const target = prompt('Target command (without prefix):');
+    if (!target) return;
+    api('/aliases', 'POST', { alias, target }).then(d => {
+        if (d.ok) loadAliases(); else alert('Error: ' + d.error);
+    });
+}
+
+async function deleteAlias(alias) {
+    const d = await api('/aliases', 'DELETE', { alias });
+    if (d.ok) loadAliases(); else alert('Error: ' + d.error);
+}
+
+// ── Repos ──────────────────────────────────────────────────────────────────────
+async function loadRepos() {
+    const d = await api('/repos');
+    const el = document.getElementById('repos-card');
+    if (!d.ok) { el.innerHTML = `<span style="color:var(--red)">${esc(d.error)}</span>`; return; }
+    const repos = d.result || [];
+    let html = '<table><tr><th>#</th><th>URL</th><th></th></tr>';
+    for (const [i, r] of repos.entries()) {
+        html += `<tr><td class="text2">${i+1}</td><td style="word-break:break-all">${esc(r)}</td>
+            <td><button class="btn btn-danger" onclick="deleteRepo(${i})" style="padding:3px 8px;font-size:12px">Remove</button></td></tr>`;
+    }
+    if (!repos.length) html += '<tr><td colspan="3" class="text2">No repos configured.</td></tr>';
+    html += '</table>';
+    el.innerHTML = html;
+}
+
+function showAddRepo() {
+    const url = prompt('Repository URL:');
+    if (!url) return;
+    api('/repos', 'POST', { url }).then(d => {
+        if (d.ok) loadRepos(); else alert('Error: ' + d.error);
+    });
+}
+
+async function deleteRepo(index) {
+    const d = await api('/repos', 'DELETE', { index });
+    if (d.ok) loadRepos(); else alert('Error: ' + d.error);
+}
+
+// ── Logs ───────────────────────────────────────────────────────────────────────
+async function fetchLogs() {
+    const level = document.getElementById('log-level').value;
+    const limit = 100;
+    const d = await api('/log?level=' + level + '&limit=' + limit + '&n=' + limit);
+    const out = document.getElementById('log-output');
+    if (!d.ok) { out.innerHTML = `<span style="color:var(--red)">Failed to load logs: ${esc(d.error)}</span>`; return; }
+    const lines = d.result || [];
+    out.innerHTML = lines.map(l => {
+        const lo = l.toLowerCase();
+        const cls = lo.includes('error') ? 'log-error' : lo.includes('warn') ? 'log-warn' : 'log-info';
+        return `<div class="${cls}">${esc(l)}</div>`;
+    }).join('');
+    out.scrollTop = out.scrollHeight;
+}
+
+// ── Command ────────────────────────────────────────────────────────────────────
+async function runCommand() {
+    const cmd = document.getElementById('cmd-input').value.trim();
+    const el = document.getElementById('cmd-result');
+    if (!cmd) return;
+    el.textContent = 'Running…';
+    const d = await api('/command', 'POST', { command: cmd });
+    el.textContent = d.ok ? (typeof d.result === 'object' ? JSON.stringify(d.result) : String(d.result || '(no output)')) : ('Error: ' + d.error);
+}
+
+// ── Terminal ───────────────────────────────────────────────────────────────────
+async function runTerminal() {
+    const cmd = document.getElementById('term-input').value.trim();
+    const out = document.getElementById('term-output');
+    if (!cmd) return;
+    document.getElementById('term-input').value = '';
+    out.innerHTML += `<div style="color:var(--accent)">$ ${esc(cmd)}</div>`;
+    const d = await api('/command', 'POST', { command: cmd });
+    out.innerHTML += `<div>${esc(d.ok ? (d.result || '') : ('Error: ' + d.error))}</div>`;
+    out.scrollTop = out.scrollHeight;
+}
+
+// ── Kernel control ─────────────────────────────────────────────────────────────
+async function restart() {
+    if (!confirm('Restart MCUB kernel?')) return;
+    const d = await api('/restart', 'POST');
+    if (!d.ok) alert('Error: ' + d.error);
+}
+
+async function doStop() {
+    if (!confirm('Stop MCUB kernel?')) return;
+    const d = await api('/stop', 'POST');
+    if (d.ok) alert('Kernel stopping...');
+    else alert('Error: ' + d.error);
+}
+
+// Auto-refresh status every 30 s when on status page
+setInterval(() => {
+    if (!document.getElementById('page-status').classList.contains('hidden')) loadStatus();
+}, 30000);
 </script>
 </body>
 </html>

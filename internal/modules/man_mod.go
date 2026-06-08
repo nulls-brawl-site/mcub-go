@@ -12,8 +12,21 @@ import (
 	"strings"
 
 	"github.com/nulls-brawl-site/mcub-go/internal/kernel"
+	"github.com/nulls-brawl-site/mcub-go/internal/langpacks"
 	"github.com/nulls-brawl-site/mcub-go/internal/loader"
 	"github.com/nulls-brawl-site/telegram-mcub-go/events"
+)
+
+// Custom emoji constants from man.py CUSTOM_EMOJI dict.
+const (
+	manEmojiCrystal   = `<tg-emoji emoji-id="5361837567463399422">🔮</tg-emoji>`
+	manEmojiDNA       = `<tg-emoji emoji-id="5404451992456156919">🧬</tg-emoji>`
+	manEmojiAlembic   = `<tg-emoji emoji-id="5379679518740978720">⚗️</tg-emoji>`
+	manEmojiSnowflake = `<tg-emoji emoji-id="5431895003821513760">❄️</tg-emoji>`
+	manEmojiBlocked   = `<tg-emoji emoji-id="5767151002666929821">🚫</tg-emoji>`
+	manEmojiPancake   = `<tg-emoji emoji-id="5373004843210251169">🥞</tg-emoji>`
+	manEmojiConfused  = `<tg-emoji emoji-id="5249119354825487565">🫨</tg-emoji>`
+	manEmojiBubble    = `<tg-emoji emoji-id="5085121109574025951">🫧</tg-emoji>`
 )
 
 // manModule implements .man, .manhide, .manunhide, .help.
@@ -55,6 +68,30 @@ func (m *manModule) Commands() []loader.Command {
 		{Name: "manunhide", Description: "<name> unhide module from man list", Handler: m.cmdManunhide},
 		{Name: "help", Description: "redirects to .man", Handler: m.cmdHelp},
 	}
+}
+
+// ---------- langpack helpers ----------
+
+func (m *manModule) lang() string {
+	if m.k != nil {
+		return m.k.GetLanguage()
+	}
+	return "en"
+}
+
+// s returns a localised string from the "man" module by key.
+func (m *manModule) s(key string) string {
+	return langpacks.Default.Get(m.lang(), "man", key)
+}
+
+// sf returns a localised string with Python-style {placeholder} substitution.
+// pairs must be alternating: "{key}", "value", "{key2}", "value2", ...
+func (m *manModule) sf(key string, pairs ...string) string {
+	raw := langpacks.Default.Get(m.lang(), "man", key)
+	if len(pairs) > 0 {
+		return strings.NewReplacer(pairs...).Replace(raw)
+	}
+	return raw
 }
 
 // ---------- DB helpers ----------
@@ -124,7 +161,7 @@ func (m *manModule) getCommandDesc(cmdName string) string {
 func (m *manModule) showModuleList(ctx context.Context, ev *events.NewMessage) error {
 	hidden, _ := m.getHidden(ctx)
 
-	// Collect system module names
+	// Collect system module names.
 	sysNames := make([]string, 0, len(m.k.SystemModules))
 	for name := range m.k.SystemModules {
 		sysNames = append(sysNames, name)
@@ -134,7 +171,7 @@ func (m *manModule) showModuleList(ctx context.Context, ev *events.NewMessage) e
 		userNames = append(userNames, name)
 	}
 
-	// Filter hidden
+	// Filter hidden.
 	var filteredSys []string
 	for _, n := range sysNames {
 		if !contains(hidden, n) {
@@ -153,9 +190,10 @@ func (m *manModule) showModuleList(ctx context.Context, ev *events.NewMessage) e
 	prefix := m.k.Prefix()
 	var sb strings.Builder
 
-	// System modules block
-	sb.WriteString(fmt.Sprintf("🔮 <b>System modules:</b> <code>%d</code>\n", len(filteredSys)))
-	sb.WriteString("<blockquote expandable>\n")
+	// System modules block.
+	// Format: {crystal} <b>{system_modules}:</b> <code>N</code><blockquote expandable>
+	sb.WriteString(fmt.Sprintf("%s <b>%s:</b> <code>%d</code><blockquote expandable>\n",
+		manEmojiCrystal, m.s("system_modules"), len(filteredSys)))
 	for _, name := range filteredSys {
 		cmds := m.getModuleCommands(name)
 		cmdList := make([]string, 0, len(cmds))
@@ -166,10 +204,15 @@ func (m *manModule) showModuleList(ctx context.Context, ev *events.NewMessage) e
 	}
 	sb.WriteString("</blockquote>")
 
-	// User modules block (only if any)
+	// User modules block (only if any).
 	if len(filteredUser) > 0 {
-		sb.WriteString(fmt.Sprintf("\n🔮 <b>User modules: %d</b>\n", len(filteredUser)))
-		sb.WriteString("<blockquote expandable>\n")
+		// Format: {crystal} <b>{user_modules_page}:</b><blockquote expandable>
+		userLabel := strings.NewReplacer(
+			"{page}", "1",
+			"{count}", fmt.Sprintf("%d", len(filteredUser)),
+		).Replace(m.s("user_modules_page"))
+		sb.WriteString(fmt.Sprintf("\n%s <b>%s:</b><blockquote expandable>\n",
+			manEmojiCrystal, userLabel))
 		for _, name := range filteredUser {
 			cmds := m.getModuleCommands(name)
 			cmdList := make([]string, 0, len(cmds))
@@ -187,12 +230,12 @@ func (m *manModule) showModuleList(ctx context.Context, ev *events.NewMessage) e
 // ---------- showModuleDetails ----------
 
 func (m *manModule) showModuleDetails(ctx context.Context, ev *events.NewMessage, name string) error {
-	// Attempt exact then prefix match across system + user modules
+	// Attempt exact then prefix match across system + user modules.
 	_, isSys := m.k.SystemModules[name]
 	_, isUser := m.k.LoadedModules[name]
 
 	if !isSys && !isUser {
-		// Try case-insensitive prefix match
+		// Try case-insensitive prefix match.
 		nameLower := strings.ToLower(name)
 		for n := range m.k.SystemModules {
 			if strings.HasPrefix(strings.ToLower(n), nameLower) {
@@ -213,28 +256,48 @@ func (m *manModule) showModuleDetails(ctx context.Context, ev *events.NewMessage
 	}
 
 	if !isSys && !isUser {
+		// Format: <blockquote expandable>{blocked} {module_not_found}</blockquote>
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("🚫 Module <code>%s</code> not found", html.EscapeString(name)))
+			fmt.Sprintf("<blockquote expandable>%s %s</blockquote>",
+				manEmojiBlocked, m.s("module_not_found")))
 	}
 
 	prefix := m.k.Prefix()
 	cmds := m.getModuleCommands(name)
 
+	// Format matching Python _build_module_detail:
+	// {dna} <b>{module}</b> <code>name</code>:
+	// {alembic} <b>{description}:</b> <i>desc</i>
+	// {snowflake} <b>{version}:</b> <code>ver</code>
+	// <blockquote expandable>
+	// {bubble} <code>.cmd</code> - <b>desc</b>
+	// </blockquote>
+	// <blockquote>{pancake} <b>{author}:</b> <i>@author</i></blockquote>
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🧬 <b>Module</b> <code>%s</code>:\n", html.EscapeString(name)))
-	sb.WriteString(fmt.Sprintf("⚗️ <b>Description:</b> <i>%s module</i>\n", html.EscapeString(name)))
-	sb.WriteString("❄️ <b>Version:</b> <code>1.0.0</code>\n")
-	sb.WriteString("<blockquote expandable>\n")
-	for _, cmd := range cmds {
-		desc := m.getCommandDesc(cmd)
-		if desc == "" {
-			desc = "no description"
+	sb.WriteString(fmt.Sprintf("%s <b>%s</b> <code>%s</code>:\n",
+		manEmojiDNA, m.s("module"), html.EscapeString(name)))
+	sb.WriteString(fmt.Sprintf("%s <b>%s:</b> <i>%s</i>\n",
+		manEmojiAlembic, m.s("description"), m.s("no_description")))
+	sb.WriteString(fmt.Sprintf("%s <b>%s:</b> <code>1.0.0</code>\n",
+		manEmojiSnowflake, m.s("version")))
+	sb.WriteString("<blockquote expandable>")
+	if len(cmds) > 0 {
+		for _, cmd := range cmds {
+			desc := m.getCommandDesc(cmd)
+			if desc == "" {
+				desc = m.s("no_description")
+			}
+			sb.WriteString(fmt.Sprintf("%s <code>%s%s</code> - <b>%s</b>\n",
+				manEmojiBubble,
+				html.EscapeString(prefix), html.EscapeString(cmd),
+				html.EscapeString(desc)))
 		}
-		sb.WriteString(fmt.Sprintf("🫧 <code>%s%s</code> - <b>%s</b>\n",
-			html.EscapeString(prefix), html.EscapeString(cmd), html.EscapeString(desc)))
+	} else {
+		sb.WriteString(fmt.Sprintf("%s %s\n", manEmojiBlocked, m.s("no_commands")))
 	}
 	sb.WriteString("</blockquote>")
-	sb.WriteString("\n<blockquote>🥞 <b>Author:</b> <i>@hairpin00</i></blockquote>")
+	sb.WriteString(fmt.Sprintf("\n<blockquote>%s <b>%s:</b> <i>%s</i></blockquote>",
+		manEmojiPancake, m.s("author"), m.s("unknown")))
 
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, sb.String())
 }
@@ -267,30 +330,27 @@ func (m *manModule) cmdManhide(ctx context.Context, ev *events.NewMessage) error
 	text := ev.Text()
 	parts := strings.SplitN(text, " ", 2)
 	if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			`🚫 <i>Usage: .manhide &lt;name&gt;</i>`)
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("manhide_usage"))
 	}
 	name := strings.TrimSpace(parts[1])
 
 	hidden, err := m.getHidden(ctx)
 	if err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("🚫 <i>DB error: %s</i>", html.EscapeString(err.Error())))
+			fmt.Sprintf("%s <i>DB error: %s</i>", manEmojiBlocked, html.EscapeString(err.Error())))
 	}
 
 	if contains(hidden, name) {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("☑️ <i>Module</i> <code>%s</code> <i>is already hidden</i>", html.EscapeString(name)))
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("module_already_hidden"))
 	}
 
 	hidden = append(hidden, name)
 	if err := m.saveHidden(ctx, hidden); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("🚫 <i>DB error: %s</i>", html.EscapeString(err.Error())))
+			fmt.Sprintf("%s <i>DB error: %s</i>", manEmojiBlocked, html.EscapeString(err.Error())))
 	}
 
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("👁 <i>Module hidden:</i>\n<code>%s</code>", html.EscapeString(name)))
+	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("module_hidden"))
 }
 
 func (m *manModule) cmdManunhide(ctx context.Context, ev *events.NewMessage) error {
@@ -301,23 +361,21 @@ func (m *manModule) cmdManunhide(ctx context.Context, ev *events.NewMessage) err
 	text := ev.Text()
 	parts := strings.SplitN(text, " ", 2)
 	if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			`🚫 <i>Usage: .manunhide &lt;name&gt;</i>`)
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("manunhide_usage"))
 	}
 	name := strings.TrimSpace(parts[1])
 
 	hidden, err := m.getHidden(ctx)
 	if err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("🚫 <i>DB error: %s</i>", html.EscapeString(err.Error())))
+			fmt.Sprintf("%s <i>DB error: %s</i>", manEmojiBlocked, html.EscapeString(err.Error())))
 	}
 
 	if !contains(hidden, name) {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("☑️ <i>Module</i> <code>%s</code> <i>is not hidden</i>", html.EscapeString(name)))
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("module_not_hidden"))
 	}
 
-	// Remove from hidden list
+	// Remove from hidden list.
 	newHidden := hidden[:0]
 	for _, h := range hidden {
 		if h != name {
@@ -327,11 +385,10 @@ func (m *manModule) cmdManunhide(ctx context.Context, ev *events.NewMessage) err
 
 	if err := m.saveHidden(ctx, newHidden); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("🚫 <i>DB error: %s</i>", html.EscapeString(err.Error())))
+			fmt.Sprintf("%s <i>DB error: %s</i>", manEmojiBlocked, html.EscapeString(err.Error())))
 	}
 
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("☑️ <i>Module unhidden:</i>\n<code>%s</code>", html.EscapeString(name)))
+	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("module_unhidden"))
 }
 
 func (m *manModule) cmdHelp(ctx context.Context, ev *events.NewMessage) error {

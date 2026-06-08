@@ -22,15 +22,15 @@ const (
 	emojiOKGreen   = `<tg-emoji emoji-id="5902002809573740949">✅</tg-emoji>`
 )
 
-// emojiFaces is a list of kaomoji used for stop/update messages.
-var emojiFaces = []string{
+// kaomojis is the exact list from Python updates.py.
+var kaomojis = []string{
 	"ಠ_ಠ", "( ཀ ʖ̯ ཀ)", "(◕‿◕✿)", "(つ･･)つ", "༼つ◕_◕༽つ",
 	"(•_•)", "☜(ﾟヮﾟ☜)", "(☞ﾟヮﾟ)☞", "ʕ•ᴥ•ʔ", "(づ￣ ³￣)づ",
 	">_<", "0_o",
 }
 
 func randomFace() string {
-	return emojiFaces[rand.Intn(len(emojiFaces))]
+	return kaomojis[rand.Intn(len(kaomojis))]
 }
 
 // updatesModule implements the "updates" system module.
@@ -89,18 +89,28 @@ func (m *updatesModule) detectBranch() string {
 	return "main"
 }
 
+// mcubName returns the MCUB display name.
+// Non-premium fallback matches Python: "MCUB".
+func (m *updatesModule) mcubName() string {
+	return "MCUB"
+}
+
 // ---------- .restart ----------
 
 // cmdRestart sends a restarting message and re-execs the process.
+// Message format matches Python:
+//
+//	<blockquote>{telescope} <i>Your <b>MCUB</b> is restarting...</i></blockquote>
 func (m *updatesModule) cmdRestart(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
 
-	msg := fmt.Sprintf(
-		`<blockquote>%s <i>Your <b>MCUB</b> is restarting...</i></blockquote>`,
-		emojiTelescope,
-	)
+	// Python: f"<blockquote>{PREMIUM_EMOJI['telescope']} <i>{_s('restarting').format(mcub=mcub_handler())}</i></blockquote>"
+	// langpack restarting: 'Your <b>{mcub}</b> is restarting...'
+	restartingText := sf(m.k, "updates", "restarting", map[string]interface{}{"mcub": m.mcubName()})
+	msg := fmt.Sprintf(`<blockquote>%s <i>%s</i></blockquote>`, emojiTelescope, restartingText)
+
 	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, msg); err != nil {
 		return err
 	}
@@ -111,6 +121,7 @@ func (m *updatesModule) cmdRestart(ctx context.Context, ev *events.NewMessage) e
 // ---------- .update ----------
 
 // cmdUpdate pulls the latest git changes and restarts the process.
+// Flow matches Python updates.py cmd_update exactly.
 func (m *updatesModule) cmdUpdate(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -125,18 +136,17 @@ func (m *updatesModule) cmdUpdate(ctx context.Context, ev *events.NewMessage) er
 
 	result, err := exec.Command("git", "pull", "origin", branch).CombinedOutput()
 	if err != nil {
-		errMsg := fmt.Sprintf(
-			`%s <b>Error:</b> <code>%s</code>`,
-			emojiError, err.Error(),
-		)
+		// langpack error: '<tg-emoji ...>❌</tg-emoji> <b>Error:</b> <code>{error}</code>'
+		errMsg := sf(m.k, "updates", "error", map[string]interface{}{"error": err.Error()})
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, errMsg)
 	}
 
 	output := string(result)
 
 	if strings.Contains(output, "Already up to date") {
+		// langpack already_updated: '<tg-emoji ...>✅</tg-emoji> <b>Already latest version {version}</b>'
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf(`%s <b>Already latest version %s</b>`, emojiOKGreen, m.k.Version))
+			sf(m.k, "updates", "already_updated", map[string]interface{}{"version": m.k.Version}))
 	}
 
 	// Successful pull.
@@ -144,10 +154,8 @@ func (m *updatesModule) cmdUpdate(ctx context.Context, ev *events.NewMessage) er
 	if len(outPreview) > 200 {
 		outPreview = outPreview[:200]
 	}
-	pullMsg := fmt.Sprintf(
-		`%s <b>Git pull successful!</b>`+"\n\n"+`<code>%s</code>`,
-		emojiAlembic, outPreview,
-	)
+	// langpack git_pull_success: '<tg-emoji ...>📝</tg-emoji> <b>Git pull successful!</b>\n\n<code>{output}</code>'
+	pullMsg := sf(m.k, "updates", "git_pull_success", map[string]interface{}{"output": outPreview})
 	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, pullMsg); err != nil {
 		return err
 	}
@@ -155,10 +163,8 @@ func (m *updatesModule) cmdUpdate(ctx context.Context, ev *events.NewMessage) er
 	time.Sleep(2 * time.Second)
 
 	face := randomFace()
-	successMsg := fmt.Sprintf(
-		`%s <b>Update successful!</b> %s`+"\n\n"+`Restarting in 2 seconds...`,
-		emojiAlembic, face,
-	)
+	// langpack update_success: '<tg-emoji ...>⚗️</tg-emoji> <b>Update successful!</b> {emoji}\n\nRestarting in 2 seconds...'
+	successMsg := sf(m.k, "updates", "update_success", map[string]interface{}{"emoji": face})
 	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, successMsg); err != nil {
 		return err
 	}
@@ -171,16 +177,20 @@ func (m *updatesModule) cmdUpdate(ctx context.Context, ev *events.NewMessage) er
 // ---------- .stop ----------
 
 // cmdStop gracefully stops the userbot.
+// Message format matches Python:
+//
+//	<tg-emoji ...>🧲</tg-emoji> <b>Your <i>MCUB</i> is stopping...</b> ʕ•ᴥ•ʔ
 func (m *updatesModule) cmdStop(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
 
 	face := randomFace()
-	msg := fmt.Sprintf(
-		`%s <b>Your <i>MCUB</i> is stopping...</b> %s`,
-		emojiMagnet, face,
-	)
+	// langpack stopping: '<tg-emoji ...>🧲</tg-emoji> <b>Your <i>{mcub}</i> is stopping...</b> {emoji}'
+	msg := sf(m.k, "updates", "stopping", map[string]interface{}{
+		"mcub":  m.mcubName(),
+		"emoji": face,
+	})
 	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, msg); err != nil {
 		return err
 	}
