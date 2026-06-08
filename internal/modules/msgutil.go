@@ -14,15 +14,19 @@ import (
 )
 
 // peerIDToInputPeer converts a numeric peer ID to a tg.InputPeerClass.
-// Positive IDs are users; IDs < -999999999 are channels/supergroups;
-// other negative IDs are legacy groups.
-func peerIDToInputPeer(peerID int64) tg.InputPeerClass {
+// Uses the kernel's Telegram client access-hash cache when available.
+func peerIDToInputPeer(peerID int64, k ...*kernel.Kernel) tg.InputPeerClass {
+	// Try to get access hash from the client cache.
+	var hash int64
+	if len(k) > 0 && k[0] != nil && k[0].Client != nil {
+		hash = k[0].Client.PeerAccessHash(peerID)
+	}
 	if peerID > 0 {
-		return &tg.InputPeerUser{UserID: peerID}
+		return &tg.InputPeerUser{UserID: peerID, AccessHash: hash}
 	}
 	if peerID < -999999999 {
 		chanID := -(peerID + 1000000000000)
-		return &tg.InputPeerChannel{ChannelID: chanID}
+		return &tg.InputPeerChannel{ChannelID: chanID, AccessHash: hash}
 	}
 	return &tg.InputPeerChat{ChatID: -peerID}
 }
@@ -36,7 +40,7 @@ func editHTML(ctx context.Context, k *kernel.Kernel, peerID int64, msgID int, ht
 	if plain == "" {
 		plain = html // fallback: send raw HTML as plain text
 	}
-	peer := peerIDToInputPeer(peerID)
+	peer := peerIDToInputPeer(peerID, k)
 	req := &tg.MessagesEditMessageRequest{
 		Peer:     peer,
 		ID:       msgID,
@@ -61,7 +65,7 @@ func editHTMLWithBanner(ctx context.Context, k *kernel.Kernel, peerID int64, msg
 	if plain == "" {
 		plain = html
 	}
-	peer := peerIDToInputPeer(peerID)
+	peer := peerIDToInputPeer(peerID, k)
 	req := &tg.MessagesEditMessageRequest{
 		Peer:        peer,
 		ID:          msgID,
@@ -86,7 +90,7 @@ func sendHTML(ctx context.Context, k *kernel.Kernel, peerID int64, html string) 
 	if plain == "" {
 		plain = html
 	}
-	peer := peerIDToInputPeer(peerID)
+	peer := peerIDToInputPeer(peerID, k)
 	req := &tg.MessagesSendMessageRequest{
 		Peer:     peer,
 		Message:  plain,
@@ -106,7 +110,7 @@ func sendHTMLWithButtons(ctx context.Context, k *kernel.Kernel, peerID int64, ht
 	if plain == "" {
 		plain = html
 	}
-	peer := peerIDToInputPeer(peerID)
+	peer := peerIDToInputPeer(peerID, k)
 	req := &tg.MessagesSendMessageRequest{
 		Peer:        peer,
 		Message:     plain,
@@ -127,7 +131,7 @@ func editHTMLWithButtons(ctx context.Context, k *kernel.Kernel, peerID int64, ms
 	if plain == "" {
 		plain = html
 	}
-	peer := peerIDToInputPeer(peerID)
+	peer := peerIDToInputPeer(peerID, k)
 	req := &tg.MessagesEditMessageRequest{
 		Peer:        peer,
 		ID:          msgID,

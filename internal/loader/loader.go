@@ -47,6 +47,13 @@ func (l *Loader) LoadBuiltin(m Module) error {
 		_ = l.registry.Unregister(m.Name())
 		return fmt.Errorf("OnLoad %q: %w", m.Name(), err)
 	}
+	// Register in kernel's SystemModules map so .man/.ping show correct count.
+	type systemStorer interface {
+		StoreSystemModule(name string, m Module)
+	}
+	if ss, ok := l.kernel.(systemStorer); ok {
+		ss.StoreSystemModule(m.Name(), m)
+	}
 	return nil
 }
 
