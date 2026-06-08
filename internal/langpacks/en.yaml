@@ -371,6 +371,10 @@ api_protection:
     <code>{method}</code> not found in list
   "yes": "Yes"
   "no": "No"
+  api_protection_enabled: '<tg-emoji emoji-id="5368585403467048206">🪬</tg-emoji> API protection <b>enabled</b>'
+  api_protection_disabled: '<tg-emoji emoji-id="5368585403467048206">🪬</tg-emoji> API protection <b>disabled</b>'
+  api_protection_on: API protection enabled
+  api_protection_off: API protection disabled
   analyze_report: '<tg-emoji emoji-id="4904936030232117798">🔬</tg-emoji> <b>Deep API Analysis</b>
 
     <tg-emoji emoji-id="5431736674147114227">📋</tg-emoji> <b>Multi-window counters</b>
@@ -1348,6 +1352,10 @@ config:
   btn_close: "❌ Close"
   kernel_config_title_short: Kernel Config - {page}
   modules_config_title_short: Modules Config - {page}
+  use_premium_emoji_desc: Use custom premium emoji in config UI
+  items_per_page_desc: Number of config keys per page (default 16)
+  modules_per_page_desc: Number of modules per page (default 12)
+  module_filter_desc: 'Module filter: all / core / user'
 payments:
   loading: "<tg-emoji emoji-id=\"5341715473882955310\">⚙️</tg-emoji> <i>Loading...</i>"
   stars_title: "<tg-emoji emoji-id=\"5438496463044752972\">⭐️</tg-emoji> <b>Stars Balance</b>"

@@ -72,7 +72,7 @@ func (m *pipedModule) Commands() []loader.Command {
 		{Name: "sed", Description: "[-r] s/from/to/[gi] [text] — text substitution", Handler: m.cmdSed},
 		{Name: "strip", Description: "[-e] [text] — strip whitespace from each line", Handler: m.cmdStrip},
 		{Name: "b64", Description: "[-d] [text] — base64 encode/decode", Handler: m.cmdB64},
-		{Name: "jq", Description: "[key...] — format JSON / extract fields", Handler: m.cmdJSON},
+		{Name: "json", Description: "[-s[ave]] <key1> [key2 ...] extract fields from JSON", Handler: m.cmdJSON},
 		{Name: "sleep", Description: "<seconds> — sleep N seconds", Handler: m.cmdSleep},
 		{Name: "delete", Description: "— delete the event message", Handler: m.cmdDelete},
 		{Name: "random", Description: "[-l] [N [M]] — random number or random line", Handler: m.cmdRandom},
@@ -108,6 +108,16 @@ func (m *pipedModule) pipeEdit(ctx context.Context, ev *events.NewMessage, state
 		state.Capture(text)
 	}
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, text)
+}
+
+// sp returns a utils_piped langpack string (helper for this module).
+func (m *pipedModule) sp(key string) string {
+	return s(m.k, "utils_piped", key)
+}
+
+// spf returns a utils_piped langpack string with placeholder substitution.
+func (m *pipedModule) spf(key string, data map[string]interface{}) string {
+	return sf(m.k, "utils_piped", key, data)
 }
 
 // argsRaw returns the raw text after the command word.
@@ -148,15 +158,16 @@ func (m *pipedModule) cmdEcho(ctx context.Context, ev *events.NewMessage) error 
 // .nop
 // ---------------------------------------------------------------------------
 
+// cmdNop matches Python cmd_nop(): when piped, output empty string; otherwise no-op.
 func (m *pipedModule) cmdNop(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
-	state, pipeInput, isPiped := pipeState(ctx)
+	state, _, isPiped := pipeState(ctx)
 	if isPiped {
-		return m.pipeEdit(ctx, ev, state, pipeInput)
+		return m.pipeEdit(ctx, ev, state, "")
 	}
-	return m.pipeEdit(ctx, ev, state, "")
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -229,7 +240,7 @@ func (m *pipedModule) cmdGrep(ctx context.Context, ev *events.NewMessage) error 
 		text = pipeInput
 	}
 	if pattern == "" || text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ "+m.k.Prefix()+"grep [-v] [-r] &lt;pattern&gt; [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("grep_usage"))
 	}
 
 	lines := strings.Split(text, "\n")
@@ -256,7 +267,7 @@ func (m *pipedModule) cmdGrep(ctx context.Context, ev *events.NewMessage) error 
 	}
 
 	if len(matched) == 0 {
-		return m.pipeEdit(ctx, ev, state, "Not found")
+		return m.pipeEdit(ctx, ev, state, m.sp("no_match"))
 	}
 	return m.pipeEdit(ctx, ev, state, strings.Join(matched, "\n"))
 }
@@ -290,7 +301,7 @@ func (m *pipedModule) cmdHead(ctx context.Context, ev *events.NewMessage) error 
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ head [-N] [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("head_usage"))
 	}
 
 	lines := strings.Split(text, "\n")
@@ -329,7 +340,7 @@ func (m *pipedModule) cmdTail(ctx context.Context, ev *events.NewMessage) error 
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ tail [-N] [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("tail_usage"))
 	}
 
 	lines := strings.Split(text, "\n")
@@ -374,7 +385,7 @@ func (m *pipedModule) cmdSort(ctx context.Context, ev *events.NewMessage) error 
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ sort [-r] [-u] [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("sort_usage"))
 	}
 
 	lines := strings.Split(text, "\n")
@@ -420,7 +431,7 @@ func (m *pipedModule) cmdUniq(ctx context.Context, ev *events.NewMessage) error 
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ uniq [-c] [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("uniq_usage"))
 	}
 
 	lines := strings.Split(text, "\n")
@@ -486,7 +497,7 @@ func (m *pipedModule) cmdWC(ctx context.Context, ev *events.NewMessage) error {
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ wc [-l|-w|-c] [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("wc_usage"))
 	}
 
 	var result string
@@ -517,7 +528,7 @@ func (m *pipedModule) cmdCalc(ctx context.Context, ev *events.NewMessage) error 
 		expr = pipeInput
 	}
 	if expr == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ calc &lt;expr&gt;")
+		return m.pipeEdit(ctx, ev, state, m.sp("calc_usage"))
 	}
 
 	// If expr starts with an operator and pipeInput is a number, apply to it.
@@ -526,7 +537,7 @@ func (m *pipedModule) cmdCalc(ctx context.Context, ev *events.NewMessage) error 
 			opExpr := fmt.Sprintf("(%s)%s", strings.TrimSpace(pipeInput), expr)
 			result, calcErr := safeCalc(opExpr)
 			if calcErr != nil {
-				return m.pipeEdit(ctx, ev, state, "❌ Calc error: "+calcErr.Error())
+				return m.pipeEdit(ctx, ev, state, m.spf("calc_error", map[string]interface{}{"err": calcErr.Error()}))
 			}
 			return m.pipeEdit(ctx, ev, state, result)
 		} else {
@@ -536,7 +547,7 @@ func (m *pipedModule) cmdCalc(ctx context.Context, ev *events.NewMessage) error 
 
 	result, err := safeCalc(expr)
 	if err != nil {
-		return m.pipeEdit(ctx, ev, state, "❌ Calc error: "+err.Error())
+		return m.pipeEdit(ctx, ev, state, m.spf("calc_error", map[string]interface{}{"err": err.Error()}))
 	}
 	return m.pipeEdit(ctx, ev, state, result)
 }
@@ -692,7 +703,7 @@ func (m *pipedModule) cmdSed(ctx context.Context, ev *events.NewMessage) error {
 	re := regexp.MustCompile(`^s/(.*?)/(.*?)/([gi]*)(.*)$`)
 	match := re.FindStringSubmatch(args)
 	if match == nil {
-		return m.pipeEdit(ctx, ev, state, "❌ sed [-r] s/from/to/[gi] [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("sed_usage"))
 	}
 	from, to, flags, inlineText := match[1], match[2], match[3], strings.TrimSpace(match[4])
 
@@ -701,7 +712,7 @@ func (m *pipedModule) cmdSed(ctx context.Context, ev *events.NewMessage) error {
 		text = pipeInput
 	}
 	if text == "" || from == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ sed s/from/to/[gi] [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("sed_usage"))
 	}
 
 	reFlags := ""
@@ -718,7 +729,7 @@ func (m *pipedModule) cmdSed(ctx context.Context, ev *events.NewMessage) error {
 
 	pat, err := regexp.Compile(patStr)
 	if err != nil {
-		return m.pipeEdit(ctx, ev, state, "❌ Regex error: "+err.Error())
+		return m.pipeEdit(ctx, ev, state, m.spf("sed_regex_error", map[string]interface{}{"err": err.Error()}))
 	}
 
 	var result string
@@ -757,7 +768,7 @@ func (m *pipedModule) cmdStrip(ctx context.Context, ev *events.NewMessage) error
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ strip [-e] [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("strip_usage"))
 	}
 
 	lines := strings.Split(text, "\n")
@@ -799,7 +810,7 @@ func (m *pipedModule) cmdB64(ctx context.Context, ev *events.NewMessage) error {
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ b64 [-d] [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("b64_usage"))
 	}
 
 	var result string
@@ -808,7 +819,7 @@ func (m *pipedModule) cmdB64(ctx context.Context, ev *events.NewMessage) error {
 		if err != nil {
 			b, err = base64.URLEncoding.DecodeString(text)
 			if err != nil {
-				return m.pipeEdit(ctx, ev, state, "❌ Base64 decode error: "+err.Error())
+				return m.pipeEdit(ctx, ev, state, m.spf("b64_error", map[string]interface{}{"err": err.Error()}))
 			}
 		}
 		result = string(b)
@@ -819,55 +830,118 @@ func (m *pipedModule) cmdB64(ctx context.Context, ev *events.NewMessage) error {
 }
 
 // ---------------------------------------------------------------------------
-// .jq (json)
+// .json (was .jq) — matches Python cmd_json() / utils-piped.py exactly
 // ---------------------------------------------------------------------------
 
 func (m *pipedModule) cmdJSON(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
-	state, pipeInput, _ := pipeState(ctx)
+	state, pipeInput, isPiped := pipeState(ctx)
 	args := m.argsRaw(ev)
 
-	raw := pipeInput
-	if raw == "" {
-		raw = args
-		args = ""
+	// Detect -s / -save flag (matches Python: r"(?<!\S)-s(?:ave)?(?!\S)")
+	saveMode := false
+	saveFlagRe := regexp.MustCompile(`(?:^|\s)-s(?:ave)?(?:\s|$)`)
+	if saveFlagRe.MatchString(args) {
+		saveMode = true
+		args = strings.TrimSpace(saveFlagRe.ReplaceAllString(args, " "))
 	}
 
 	keys := strings.Fields(args)
+	raw := pipeInput
 
+	// No pipe input → no keys
+	if raw == "" && len(keys) == 0 {
+		return m.pipeEdit(ctx, ev, state, m.sp("json_usage"))
+	}
+
+	// No pipe input with keys → error
 	if raw == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ jq [key1 key2...] — pipe JSON or provide inline")
+		return m.pipeEdit(ctx, ev, state, m.sp("json_usage"))
 	}
 
 	var data interface{}
 	if err := json.Unmarshal([]byte(raw), &data); err != nil {
-		return m.pipeEdit(ctx, ev, state, "❌ JSON parse error: "+err.Error())
+		return m.pipeEdit(ctx, ev, state, m.spf("json_parse_error", map[string]interface{}{"err": err.Error()}))
 	}
 
+	// Pretty-print if no keys
 	if len(keys) == 0 {
 		b, err := json.MarshalIndent(data, "", "  ")
 		if err != nil {
-			return m.pipeEdit(ctx, ev, state, "❌ JSON marshal error: "+err.Error())
+			return m.pipeEdit(ctx, ev, state, m.spf("json_parse_error", map[string]interface{}{"err": err.Error()}))
 		}
 		return m.pipeEdit(ctx, ev, state, string(b))
 	}
 
-	var values []string
+	// Extract values for each key
+	values := make(map[string]string, len(keys))
+	var missing []string
 	for _, key := range keys {
 		val := jsonGet(data, key)
-		switch v := val.(type) {
-		case nil:
-			values = append(values, "null")
-		case string:
-			values = append(values, v)
-		default:
-			b, _ := json.Marshal(v)
-			values = append(values, string(b))
+		if val == nil {
+			missing = append(missing, key)
+			values[key] = ""
+		} else {
+			switch v := val.(type) {
+			case string:
+				values[key] = v
+			default:
+				b, _ := json.Marshal(v)
+				values[key] = string(b)
+			}
 		}
 	}
-	return m.pipeEdit(ctx, ev, state, strings.Join(values, " "))
+
+	if saveMode {
+		// Save each field as pipe variable (last segment of dotted key as var name).
+		for _, key := range keys {
+			varName := key
+			if idx := strings.LastIndexByte(key, '.'); idx >= 0 {
+				varName = key[idx+1:]
+			}
+			m.pipeVars.Store(varName, values[key])
+		}
+
+		savedNames := make([]string, 0, len(keys))
+		for _, key := range keys {
+			varName := key
+			if idx := strings.LastIndexByte(key, '.'); idx >= 0 {
+				varName = key[idx+1:]
+			}
+			savedNames = append(savedNames, varName)
+		}
+		savedStr := strings.Join(savedNames, ", ")
+
+		warn := ""
+		if len(missing) > 0 {
+			warn = "\n❌ Keys not found: " + strings.Join(missing, ", ")
+		}
+
+		// When piped, pass through original input.
+		if isPiped {
+			return m.pipeEdit(ctx, ev, state, pipeInput)
+		}
+		return m.pipeEdit(ctx, ev, state, "Saved: "+savedStr+warn)
+	}
+
+	// Non-save mode: join values with space
+	resultParts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		resultParts = append(resultParts, values[key])
+	}
+	result := strings.Join(resultParts, " ")
+	if len(missing) > 0 {
+		warn := m.spf("json_missing", map[string]interface{}{"keys": strings.Join(missing, ", ")})
+		if result != "" {
+			result = result + "\n" + warn
+		} else {
+			result = warn
+		}
+	}
+
+	return m.pipeEdit(ctx, ev, state, result)
 }
 
 // jsonGet extracts a value from parsed JSON by dotted path.
@@ -903,15 +977,15 @@ func (m *pipedModule) cmdSleep(ctx context.Context, ev *events.NewMessage) error
 	args := m.argsRaw(ev)
 
 	if args == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ sleep &lt;seconds&gt;")
+		return m.pipeEdit(ctx, ev, state, m.sp("sleep_usage"))
 	}
 
 	secs, err := strconv.ParseFloat(strings.TrimSpace(args), 64)
 	if err != nil || secs < 0 {
-		return m.pipeEdit(ctx, ev, state, "❌ Specify a non-negative number of seconds.")
+		return m.pipeEdit(ctx, ev, state, m.sp("sleep_usage"))
 	}
 	if secs > 300 {
-		return m.pipeEdit(ctx, ev, state, "❌ Maximum sleep is 300 seconds.")
+		return m.pipeEdit(ctx, ev, state, m.sp("sleep_usage"))
 	}
 
 	select {
@@ -947,7 +1021,7 @@ func (m *pipedModule) cmdRandom(ctx context.Context, ev *events.NewMessage) erro
 			text = pipeInput
 		}
 		if text == "" {
-			return m.pipeEdit(ctx, ev, state, "❌ random -l [text]")
+			return m.pipeEdit(ctx, ev, state, m.sp("random_usage"))
 		}
 		var lines []string
 		for _, l := range strings.Split(text, "\n") {
@@ -956,7 +1030,7 @@ func (m *pipedModule) cmdRandom(ctx context.Context, ev *events.NewMessage) erro
 			}
 		}
 		if len(lines) == 0 {
-			return m.pipeEdit(ctx, ev, state, "Not found")
+			return m.pipeEdit(ctx, ev, state, m.sp("no_match"))
 		}
 		result = lines[rand.Intn(len(lines))] // #nosec G404
 	} else {
@@ -968,14 +1042,14 @@ func (m *pipedModule) cmdRandom(ctx context.Context, ev *events.NewMessage) erro
 		case 1:
 			n, err := strconv.Atoi(parts[0])
 			if err != nil {
-				return m.pipeEdit(ctx, ev, state, "❌ random [-l] [N [M]]")
+				return m.pipeEdit(ctx, ev, state, m.sp("random_usage"))
 			}
 			hi = n
 		default:
 			n1, err1 := strconv.Atoi(parts[0])
 			n2, err2 := strconv.Atoi(parts[1])
 			if err1 != nil || err2 != nil {
-				return m.pipeEdit(ctx, ev, state, "❌ random [-l] [N [M]]")
+				return m.pipeEdit(ctx, ev, state, m.sp("random_usage"))
 			}
 			lo, hi = n1, n2
 		}
@@ -998,7 +1072,7 @@ func (m *pipedModule) cmdFwd(ctx context.Context, ev *events.NewMessage) error {
 	state, _, _ := pipeState(ctx)
 
 	if ev.ReplyToMsgID == 0 {
-		return m.pipeEdit(ctx, ev, state, "❌ Reply to a message first")
+		return m.pipeEdit(ctx, ev, state, m.sp("fwd_no_reply"))
 	}
 
 	args := strings.Fields(m.argsRaw(ev))
@@ -1017,18 +1091,18 @@ func (m *pipedModule) cmdFwd(ctx context.Context, ev *events.NewMessage) error {
 	}
 
 	if n < 1 || n > 200 {
-		return m.pipeEdit(ctx, ev, state, "❌ N must be between 1 and 200")
+		return m.pipeEdit(ctx, ev, state, m.sp("fwd_range"))
 	}
 
 	// Fetch the replied message.
 	msgs, err := m.k.Client.GetMessages(ctx, ev.PeerID, []int{ev.ReplyToMsgID})
 	if err != nil || len(msgs) == 0 || msgs[0] == nil {
-		return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ Failed to get message: %v", err))
+		return m.pipeEdit(ctx, ev, state, m.spf("fwd_get_error", map[string]interface{}{"err": fmt.Sprintf("%v", err)}))
 	}
 	msg := msgs[0]
 
 	// Show progress.
-	_ = m.pipeEdit(ctx, ev, state, fmt.Sprintf("Forwarding %d time(s)...", n))
+	_ = m.pipeEdit(ctx, ev, state, m.spf("fwd_start", map[string]interface{}{"n": n}))
 
 	sent := 0
 	for i := 0; i < n; i++ {
@@ -1051,7 +1125,7 @@ func (m *pipedModule) cmdFwd(ctx context.Context, ev *events.NewMessage) error {
 			}
 		}
 	}
-	return m.pipeEdit(ctx, ev, state, fmt.Sprintf("Done: %d/%d sent", sent, n))
+	return m.pipeEdit(ctx, ev, state, m.spf("fwd_done", map[string]interface{}{"sent": sent, "n": n}))
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,7 +1140,7 @@ func (m *pipedModule) cmdExport(ctx context.Context, ev *events.NewMessage) erro
 	args := strings.TrimSpace(m.argsRaw(ev))
 
 	if args == "" && pipeInput == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ export &lt;name&gt; [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("export_usage"))
 	}
 
 	if args == "" {
@@ -1084,11 +1158,11 @@ func (m *pipedModule) cmdExport(ctx context.Context, ev *events.NewMessage) erro
 	}
 
 	if value == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ export &lt;name&gt; [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("export_usage"))
 	}
 
 	m.pipeVars.Store(name, value)
-	return m.pipeEdit(ctx, ev, state, fmt.Sprintf("exported: %s", name))
+	return m.pipeEdit(ctx, ev, state, m.spf("exported", map[string]interface{}{"name": name}))
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,13 +1177,13 @@ func (m *pipedModule) cmdImport(ctx context.Context, ev *events.NewMessage) erro
 	args := strings.TrimSpace(m.argsRaw(ev))
 
 	if args == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ import &lt;name&gt;")
+		return m.pipeEdit(ctx, ev, state, m.sp("import_usage"))
 	}
 
 	name := strings.Fields(args)[0]
 	raw, ok := m.pipeVars.Load(name)
 	if !ok {
-		return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ not found: %s", name))
+		return m.pipeEdit(ctx, ev, state, m.spf("var_not_found", map[string]interface{}{"name": name}))
 	}
 	return m.pipeEdit(ctx, ev, state, raw.(string))
 }
@@ -1126,12 +1200,12 @@ func (m *pipedModule) cmdGetReply(ctx context.Context, ev *events.NewMessage) er
 	args := strings.ToLower(strings.TrimSpace(m.argsRaw(ev)))
 
 	if ev.ReplyToMsgID == 0 {
-		return m.pipeEdit(ctx, ev, state, "❌ No reply message")
+		return m.pipeEdit(ctx, ev, state, m.sp("reply_not_found"))
 	}
 
 	msgs, err := m.k.Client.GetMessages(ctx, ev.PeerID, []int{ev.ReplyToMsgID})
 	if err != nil || len(msgs) == 0 || msgs[0] == nil {
-		return m.pipeEdit(ctx, ev, state, "❌ No reply message")
+		return m.pipeEdit(ctx, ev, state, m.sp("fwd_no_msg"))
 	}
 	msg := msgs[0]
 
@@ -1178,16 +1252,16 @@ func (m *pipedModule) cmdRepeat(ctx context.Context, ev *events.NewMessage) erro
 	args := strings.TrimSpace(m.argsRaw(ev))
 
 	if args == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ repeat &lt;N&gt; [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("repeat_usage"))
 	}
 
 	parts := strings.SplitN(args, " ", 3)
 	n, err := strconv.Atoi(parts[0])
 	if err != nil {
-		return m.pipeEdit(ctx, ev, state, "❌ repeat &lt;N&gt; [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("repeat_usage"))
 	}
 	if n < 1 || n > 100 {
-		return m.pipeEdit(ctx, ev, state, "❌ N must be between 1 and 100")
+		return m.pipeEdit(ctx, ev, state, m.sp("repeat_range"))
 	}
 
 	sep := "\n"
@@ -1214,7 +1288,7 @@ func (m *pipedModule) cmdRepeat(ctx context.Context, ev *events.NewMessage) erro
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ repeat &lt;N&gt; [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("repeat_usage"))
 	}
 
 	repeated := make([]string, n)
@@ -1236,7 +1310,7 @@ func (m *pipedModule) cmdIf(ctx context.Context, ev *events.NewMessage) error {
 	args := strings.TrimSpace(m.argsRaw(ev))
 
 	if args == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ if &lt;pattern&gt; [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("if_usage"))
 	}
 
 	var pattern, inlineText string
@@ -1262,7 +1336,7 @@ func (m *pipedModule) cmdIf(ctx context.Context, ev *events.NewMessage) error {
 		text = pipeInput
 	}
 	if text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ if &lt;pattern&gt; [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("if_usage"))
 	}
 
 	re, err := regexp.Compile(pattern)
@@ -1276,7 +1350,7 @@ func (m *pipedModule) cmdIf(ctx context.Context, ev *events.NewMessage) error {
 	if matched {
 		return m.pipeEdit(ctx, ev, state, text)
 	}
-	return m.pipeEdit(ctx, ev, state, "No match - pipeline stopped")
+	return m.pipeEdit(ctx, ev, state, m.sp("if_no_match"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,16 +1369,16 @@ func (m *pipedModule) cmdOpen(ctx context.Context, ev *events.NewMessage) error 
 		filePath = strings.TrimSpace(pipeInput)
 	}
 	if filePath == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ open &lt;path&gt;")
+		return m.pipeEdit(ctx, ev, state, m.sp("open_usage"))
 	}
 
 	// Allow both absolute and relative paths.
 	content, err := os.ReadFile(filePath) // #nosec G304
 	if err != nil {
 		if os.IsNotExist(err) {
-			return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ File not found: %s", filePath))
+			return m.pipeEdit(ctx, ev, state, m.spf("file_not_found", map[string]interface{}{"path": filePath}))
 		}
-		return m.pipeEdit(ctx, ev, state, fmt.Sprintf("❌ Error: %v", err))
+		return m.pipeEdit(ctx, ev, state, m.spf("file_error", map[string]interface{}{"err": fmt.Sprintf("%v", err)}))
 	}
 
 	text := string(content)
@@ -1335,7 +1409,7 @@ func (m *pipedModule) cmdWrite(ctx context.Context, ev *events.NewMessage) error
 	}
 
 	if args == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ write [-n] &lt;path&gt; [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("write_usage"))
 	}
 
 	parts := strings.SplitN(args, " ", 2)
@@ -1348,13 +1422,13 @@ func (m *pipedModule) cmdWrite(ctx context.Context, ev *events.NewMessage) error
 	}
 
 	if path == "" || text == "" {
-		return m.pipeEdit(ctx, ev, state, "❌ write [-n] &lt;path&gt; [text]")
+		return m.pipeEdit(ctx, ev, state, m.sp("write_usage"))
 	}
 
 	// Create parent directories.
 	if dir := strings.LastIndex(path, "/"); dir > 0 {
 		if err := os.MkdirAll(path[:dir], 0o755); err != nil {
-			return m.pipeEdit(ctx, ev, state, "❌ Write error: "+err.Error())
+			return m.pipeEdit(ctx, ev, state, m.spf("write_error", map[string]interface{}{"err": err.Error()}))
 		}
 	}
 
@@ -1366,12 +1440,12 @@ func (m *pipedModule) cmdWrite(ctx context.Context, ev *events.NewMessage) error
 		f, openErr = os.Create(path) // #nosec G304
 	}
 	if openErr != nil {
-		return m.pipeEdit(ctx, ev, state, "❌ Write error: "+openErr.Error())
+		return m.pipeEdit(ctx, ev, state, m.spf("write_error", map[string]interface{}{"err": openErr.Error()}))
 	}
 	defer f.Close()
 
 	if _, err := f.WriteString(text); err != nil {
-		return m.pipeEdit(ctx, ev, state, "❌ Write error: "+err.Error())
+		return m.pipeEdit(ctx, ev, state, m.spf("write_error", map[string]interface{}{"err": err.Error()}))
 	}
-	return m.pipeEdit(ctx, ev, state, fmt.Sprintf("Written: %s", path))
+	return m.pipeEdit(ctx, ev, state, m.spf("write_ok", map[string]interface{}{"path": path}))
 }

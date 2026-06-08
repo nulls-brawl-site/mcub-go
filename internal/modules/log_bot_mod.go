@@ -1,11 +1,27 @@
+// SPDX-License-Identifier: MIT
+// Port of modules/log_bot.py from MCUB-fork.
+//
+// Python log_bot.py (LogBot):
+//   - on_load(): loads config, calls setup_log_chat(), send_startup_message()
+//   - log_setup command: runs setup_log_chat() (auto-creates/finds "MCUB-logs" group)
+//   - update_check_loop (@loop): polls git, notifies on new commits
+//   - on_update_callback: git pull + restart
+//   - send_startup_message(): sends branded banner to log chat
+//   - Config: banner_url, start_message, placeholders, auto_update
+//
+// The Go kernel does not yet support:
+//   - Automatic Telegram group creation (setup_log_chat)
+//   - Background loops (@loop decorator)
+//   - Bot client startup messages
+//
+// The .log_setup command below uses the same langpack strings as Python and
+// sets / shows the log chat ID rather than auto-creating a group.
+
 package modules
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/nulls-brawl-site/mcub-go/internal/kernel"
@@ -13,7 +29,7 @@ import (
 	"github.com/nulls-brawl-site/telegram-mcub-go/events"
 )
 
-// logBotModule provides .log_setup and .logs commands.
+// logBotModule provides the .log_setup command.
 type logBotModule struct {
 	k *kernel.Kernel
 }
@@ -49,10 +65,10 @@ func (m *logBotModule) OnUnload(k interface{}) error {
 }
 
 // Commands implements loader.Module.
+// Python log_bot.py has a single @command("log_setup") handler.
 func (m *logBotModule) Commands() []loader.Command {
 	return []loader.Command{
-		{Name: "log_setup", Description: "[chat_id|off] — configure log chat", Handler: m.cmdLogSetup},
-		{Name: "log_entries", Description: "[level] [--tail N] — show recent log entries", Handler: m.cmdLogEntries},
+		{Name: "log_setup", Description: "setup logging chat", Handler: m.cmdLogSetup},
 	}
 }
 
@@ -75,7 +91,6 @@ const logBotChatIDKey = "log_bot:chat_id"
 // getLogChatID retrieves the stored log chat ID from DB.
 func (m *logBotModule) getLogChatID() (int64, bool) {
 	if m.k == nil || m.k.DB == nil {
-		// Fall back to config.
 		if m.k != nil && m.k.Config != nil && m.k.Config.LogChatID != nil {
 			return *m.k.Config.LogChatID, true
 		}
@@ -83,7 +98,6 @@ func (m *logBotModule) getLogChatID() (int64, bool) {
 	}
 	val, ok, err := m.k.DB.Get(logBotChatIDKey)
 	if err != nil || !ok {
-		// Fall back to config.
 		if m.k.Config != nil && m.k.Config.LogChatID != nil {
 			return *m.k.Config.LogChatID, true
 		}
@@ -115,26 +129,31 @@ func (m *logBotModule) clearLogChatID() error {
 // ---------- .log_setup ----------
 
 // cmdLogSetup configures the log chat.
-// .log_setup         → show current log chat ID
-// .log_setup <id>    → set log chat
-// .log_setup off     → disable logging
+// Python: always runs setup_log_chat() (auto-creates group if needed).
+// Go: no args → show setup status; <id> → set; off → disable.
+// Messages use the same langpack keys as Python (log_setup_title, log_setup_success, log_setup_fail).
 func (m *logBotModule) cmdLogSetup(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
+
+	// Announce setup start — mirrors Python: await event.edit(self.lang["log_setup_title"])
+	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+		s(m.k, "log_bot", "log_setup_title")); err != nil {
+		return err
+	}
+
 	args := m.parseArgs(ev)
 
 	if len(args) == 0 {
+		// No args: show current log chat configuration (Go cannot auto-create group).
 		chatID, ok := m.getLogChatID()
 		if !ok {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"📋 <b>Log setup</b>\n\nLog chat: <i>not configured</i>\n\n"+
-					"Use <code>log_setup &lt;chat_id&gt;</code> to set a log chat.\n"+
-					"Use <code>log_setup off</code> to disable.")
+				s(m.k, "log_bot", "log_setup_fail"))
 		}
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("📋 <b>Log setup</b>\n\nLog chat ID: <code>%d</code>\n\n"+
-				"Use <code>log_setup off</code> to disable.", chatID))
+			fmt.Sprintf("%s\nID: `%d`", s(m.k, "log_bot", "log_setup_success"), chatID))
 	}
 
 	arg := strings.TrimSpace(args[0])
@@ -142,124 +161,22 @@ func (m *logBotModule) cmdLogSetup(ctx context.Context, ev *events.NewMessage) e
 	if strings.ToLower(arg) == "off" {
 		if err := m.clearLogChatID(); err != nil {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("❌ Error disabling log: %v", err))
+				s(m.k, "log_bot", "log_setup_fail"))
 		}
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"✅ <b>Log chat disabled.</b>")
+			s(m.k, "log_bot", "log_setup_success"))
 	}
 
 	var chatID int64
 	if _, err := fmt.Sscanf(arg, "%d", &chatID); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ Invalid chat ID. Usage: <code>log_setup &lt;chat_id&gt;</code> or <code>log_setup off</code>")
+			s(m.k, "log_bot", "log_setup_fail"))
 	}
 
 	if err := m.setLogChatID(chatID); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("❌ Error saving log chat: %v", err))
+			s(m.k, "log_bot", "log_setup_fail"))
 	}
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("✅ <b>Log chat set</b> to <code>%d</code>", chatID))
-}
-
-// ---------- .log_entries ----------
-
-// kernelLogFile is the default path to the kernel log.
-const kernelLogFile = "logs/kernel.log"
-
-// cmdLogEntries shows recent log entries inline.
-// .log_entries [level] [--tail N]
-func (m *logBotModule) cmdLogEntries(ctx context.Context, ev *events.NewMessage) error {
-	if m.k == nil || ev.Raw == nil {
-		return nil
-	}
-	args := m.parseArgs(ev)
-
-	// Defaults.
-	level := ""
-	n := 50
-
-	// Parse flags.
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--tail" && i+1 < len(args) {
-			if _, err := fmt.Sscanf(args[i+1], "%d", &n); err == nil {
-				i++
-			}
-			continue
-		}
-		if _, ok := validLogLevels[strings.ToLower(a)]; ok {
-			level = strings.ToUpper(a)
-		}
-	}
-
-	logPath := filepath.Clean(kernelLogFile)
-	if _, err := os.Stat(logPath); os.IsNotExist(err) {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"📋 <b>Logs</b>\n\nLog file not found: <code>"+logPath+"</code>")
-	}
-
-	lines, err := m.readLogLines(logPath, level, n)
-	if err != nil {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("❌ Error reading log: %v", err))
-	}
-	if len(lines) == 0 {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"📋 <b>Logs</b>\n\n<i>No log entries found.</i>")
-	}
-
-	levelLabel := ""
-	if level != "" {
-		levelLabel = " [" + level + "]"
-	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "📋 <b>Recent logs%s</b> (last %d lines):\n<blockquote expandable>\n", levelLabel, len(lines))
-	for _, line := range lines {
-		fmt.Fprintf(&sb, "<code>%s</code>\n", htmlEscapeLogLine(line))
-	}
-	sb.WriteString("</blockquote>")
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, sb.String())
-}
-
-// validLogLevels for filtering.
-var validLogLevels = map[string]struct{}{
-	"debug": {}, "info": {}, "warning": {}, "warn": {},
-	"error": {}, "critical": {},
-}
-
-// readLogLines reads the last n lines from logPath, optionally filtered by level.
-func (m *logBotModule) readLogLines(logPath, level string, n int) ([]string, error) {
-	f, err := os.Open(logPath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var all []string
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if level == "" || strings.Contains(line, "["+level+"]") || strings.Contains(line, " "+level+" ") {
-			all = append(all, line)
-		}
-	}
-	if sc.Err() != nil {
-		return nil, sc.Err()
-	}
-
-	// Return last n lines.
-	if len(all) > n {
-		all = all[len(all)-n:]
-	}
-	return all, nil
-}
-
-// htmlEscapeLogLine escapes < > & for safe HTML display.
-func htmlEscapeLogLine(s string) string {
-	s = strings.ReplaceAll(s, "&", "&amp;")
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	return s
+		fmt.Sprintf("%s\nID: `%d`", s(m.k, "log_bot", "log_setup_success"), chatID))
 }

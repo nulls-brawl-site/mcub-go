@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/nulls-brawl-site/mcub-go/internal/kernel"
@@ -158,7 +159,7 @@ func (m *manModule) getCommandDesc(cmdName string) string {
 
 // ---------- showModuleList ----------
 
-func (m *manModule) showModuleList(ctx context.Context, ev *events.NewMessage) error {
+func (m *manModule) showModuleList(ctx context.Context, ev *events.NewMessage, showHidden bool) error {
 	hidden, _ := m.getHidden(ctx)
 
 	// Collect system module names.
@@ -171,16 +172,16 @@ func (m *manModule) showModuleList(ctx context.Context, ev *events.NewMessage) e
 		userNames = append(userNames, name)
 	}
 
-	// Filter hidden.
+	// Filter hidden (unless -f flag given).
 	var filteredSys []string
 	for _, n := range sysNames {
-		if !contains(hidden, n) {
+		if showHidden || !contains(hidden, n) {
 			filteredSys = append(filteredSys, n)
 		}
 	}
 	var filteredUser []string
 	for _, n := range userNames {
-		if !contains(hidden, n) {
+		if showHidden || !contains(hidden, n) {
 			filteredUser = append(filteredUser, n)
 		}
 	}
@@ -229,38 +230,101 @@ func (m *manModule) showModuleList(ctx context.Context, ev *events.NewMessage) e
 
 // ---------- showModuleDetails ----------
 
-func (m *manModule) showModuleDetails(ctx context.Context, ev *events.NewMessage, name string) error {
-	// Attempt exact then prefix match across system + user modules.
-	_, isSys := m.k.SystemModules[name]
-	_, isUser := m.k.LoadedModules[name]
+func (m *manModule) showModuleDetails(ctx context.Context, ev *events.NewMessage, searchTerm string, showHidden bool) error {
+	hidden, _ := m.getHidden(ctx)
+	nameLower := strings.ToLower(searchTerm)
 
-	if !isSys && !isUser {
-		// Try case-insensitive prefix match.
-		nameLower := strings.ToLower(name)
-		for n := range m.k.SystemModules {
-			if strings.HasPrefix(strings.ToLower(n), nameLower) {
-				name = n
-				isSys = true
-				break
-			}
+	// Gather all visible modules.
+	type modEntry struct {
+		name string
+		typ  string
+	}
+	var allMods []modEntry
+	for n := range m.k.SystemModules {
+		if showHidden || !contains(hidden, n) {
+			allMods = append(allMods, modEntry{n, "system"})
 		}
-		if !isSys {
-			for n := range m.k.LoadedModules {
-				if strings.HasPrefix(strings.ToLower(n), nameLower) {
-					name = n
-					isUser = true
-					break
-				}
-			}
+	}
+	for n := range m.k.LoadedModules {
+		if showHidden || !contains(hidden, n) {
+			allMods = append(allMods, modEntry{n, "user"})
 		}
 	}
 
-	if !isSys && !isUser {
-		// Format: <blockquote expandable>{blocked} {module_not_found}</blockquote>
+	// Exact match first.
+	var exactMatch *modEntry
+	for i := range allMods {
+		if strings.ToLower(allMods[i].name) == nameLower {
+			exactMatch = &allMods[i]
+			break
+		}
+	}
+
+	if exactMatch == nil {
+		// Substring matches against module names and command names.
+		seen := map[string]bool{}
+		var similar []modEntry
+		for _, e := range allMods {
+			if strings.Contains(strings.ToLower(e.name), nameLower) {
+				if !seen[e.name] {
+					similar = append(similar, e)
+					seen[e.name] = true
+				}
+			} else {
+				for cmdName, owner := range m.k.CommandOwners {
+					if owner == e.name && strings.Contains(strings.ToLower(cmdName), nameLower) {
+						if !seen[e.name] {
+							similar = append(similar, e)
+							seen[e.name] = true
+						}
+						break
+					}
+				}
+			}
+		}
+		if len(similar) == 1 {
+			exactMatch = &similar[0]
+		} else if len(similar) > 1 {
+			// Show a list of matching modules (Python-style "found_modules").
+			prefix := m.k.Prefix()
+			msg := fmt.Sprintf("%s <b>%s:</b>\n<blockquote expandable>", manEmojiCrystal, m.s("found_modules"))
+			for i, e := range similar {
+				if i >= 5 {
+					break
+				}
+				cmds := m.getModuleCommands(e.name)
+				cmdText := ""
+				if len(cmds) > 0 {
+					top := cmds
+					if len(top) > 2 {
+						top = top[:2]
+					}
+					parts := make([]string, 0, len(top))
+					for _, c := range top {
+						parts = append(parts, fmt.Sprintf("<code>%s%s</code>", html.EscapeString(prefix), html.EscapeString(c)))
+					}
+					cmdText = strings.Join(parts, ", ")
+				}
+				msg += fmt.Sprintf("<b>%s</b>: %s\n", html.EscapeString(e.name), cmdText)
+			}
+			msg += "</blockquote>"
+			if len(similar) > 5 {
+				msg += m.sf("and_more", "{count}", strconv.Itoa(len(similar)-5)) + "\n"
+			}
+			msg += fmt.Sprintf("\n<blockquote><i>%s</i> %s</blockquote>", m.s("no_exact_match"), manEmojiBlocked)
+			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, msg)
+		}
+	}
+
+	if exactMatch == nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
 			fmt.Sprintf("<blockquote expandable>%s %s</blockquote>",
 				manEmojiBlocked, m.s("module_not_found")))
 	}
+
+	name := exactMatch.name
+	typ := exactMatch.typ
+	_ = typ
 
 	prefix := m.k.Prefix()
 	cmds := m.getModuleCommands(name)
@@ -311,15 +375,27 @@ func (m *manModule) cmdMan(ctx context.Context, ev *events.NewMessage) error {
 
 	text := ev.Text()
 	parts := strings.SplitN(text, " ", 2)
-	args := ""
+	rawArgs := ""
 	if len(parts) >= 2 {
-		args = strings.TrimSpace(parts[1])
+		rawArgs = strings.TrimSpace(parts[1])
 	}
 
-	if args == "" {
-		return m.showModuleList(ctx, ev)
+	// Parse args — strip -f flag (show hidden modules).
+	argList := strings.Fields(rawArgs)
+	showHidden := false
+	var cleanArgs []string
+	for _, a := range argList {
+		if a == "-f" {
+			showHidden = true
+		} else {
+			cleanArgs = append(cleanArgs, a)
+		}
 	}
-	return m.showModuleDetails(ctx, ev, args)
+
+	if len(cleanArgs) == 0 {
+		return m.showModuleList(ctx, ev, showHidden)
+	}
+	return m.showModuleDetails(ctx, ev, strings.Join(cleanArgs, " "), showHidden)
 }
 
 func (m *manModule) cmdManhide(ctx context.Context, ev *events.NewMessage) error {
@@ -333,6 +409,30 @@ func (m *manModule) cmdManhide(ctx context.Context, ev *events.NewMessage) error
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("manhide_usage"))
 	}
 	name := strings.TrimSpace(parts[1])
+
+	// Resolve module name: exact match first, then fuzzy.
+	allMods := map[string]bool{}
+	for n := range m.k.SystemModules {
+		allMods[n] = true
+	}
+	for n := range m.k.LoadedModules {
+		allMods[n] = true
+	}
+	if !allMods[name] {
+		nameLower := strings.ToLower(name)
+		var matches []string
+		for n := range allMods {
+			if strings.Contains(strings.ToLower(n), nameLower) {
+				matches = append(matches, n)
+			}
+		}
+		if len(matches) == 1 {
+			name = matches[0]
+		} else {
+			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+				fmt.Sprintf("%s %s", manEmojiBlocked, m.s("module_not_found")))
+		}
+	}
 
 	hidden, err := m.getHidden(ctx)
 	if err != nil {
@@ -350,7 +450,8 @@ func (m *manModule) cmdManhide(ctx context.Context, ev *events.NewMessage) error
 			fmt.Sprintf("%s <i>DB error: %s</i>", manEmojiBlocked, html.EscapeString(err.Error())))
 	}
 
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("module_hidden"))
+	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+		fmt.Sprintf("%s\n<code>%s</code>", m.s("module_hidden"), html.EscapeString(name)))
 }
 
 func (m *manModule) cmdManunhide(ctx context.Context, ev *events.NewMessage) error {
@@ -372,11 +473,23 @@ func (m *manModule) cmdManunhide(ctx context.Context, ev *events.NewMessage) err
 	}
 
 	if !contains(hidden, name) {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("module_not_hidden"))
+		// Fuzzy match within the hidden list.
+		nameLower := strings.ToLower(name)
+		var matches []string
+		for _, h := range hidden {
+			if strings.Contains(strings.ToLower(h), nameLower) {
+				matches = append(matches, h)
+			}
+		}
+		if len(matches) == 1 {
+			name = matches[0]
+		} else {
+			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("module_not_hidden"))
+		}
 	}
 
 	// Remove from hidden list.
-	newHidden := hidden[:0]
+	var newHidden []string
 	for _, h := range hidden {
 		if h != name {
 			newHidden = append(newHidden, h)
@@ -388,7 +501,8 @@ func (m *manModule) cmdManunhide(ctx context.Context, ev *events.NewMessage) err
 			fmt.Sprintf("%s <i>DB error: %s</i>", manEmojiBlocked, html.EscapeString(err.Error())))
 	}
 
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("module_unhidden"))
+	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+		fmt.Sprintf("%s\n<code>%s</code>", m.s("module_unhidden"), html.EscapeString(name)))
 }
 
 func (m *manModule) cmdHelp(ctx context.Context, ev *events.NewMessage) error {
@@ -396,6 +510,9 @@ func (m *manModule) cmdHelp(ctx context.Context, ev *events.NewMessage) error {
 		return nil
 	}
 	prefix := m.k.Prefix()
+	// Python: f"<b>{self.strings['help_not_command']}</b><code>{self.kernel.custom_prefix}man?</code>"
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("<b>Use</b> <code>%sman</code> <b>to see module list.</b>", html.EscapeString(prefix)))
+		fmt.Sprintf("<b>%s</b><code>%sman?</code>",
+			html.EscapeString(m.s("help_not_command")),
+			html.EscapeString(prefix)))
 }

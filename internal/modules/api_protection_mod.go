@@ -25,29 +25,53 @@ var apiModeDescriptions = map[string]string{
 }
 
 // APIProtectionConfig holds the persisted configuration for this module.
+// All fields mirror the Python DEFAULT_CONFIG / ModuleConfig registration.
 type APIProtectionConfig struct {
+	// Core rate-limiting
 	Enabled        bool    `json:"enable_protection"`
-	Mode           string  `json:"mcub_mode"`
 	TimeSample     int     `json:"time_sample"`
-	LocalFloodwait int     `json:"local_floodwait"`
-	Threshold      int     `json:"custom_threshold"`
-	DryRun         bool    `json:"mcub_dry_run"`
-	Lockdown       bool    `json:"mcub_lockdown"`
-	ZScoreThresh   float64 `json:"zscore_threshold"`
 	LimitProfile   string  `json:"limit_profile"`
+	Threshold      int     `json:"custom_threshold"`
+	LocalFloodwait int     `json:"local_floodwait"`
+	IgnoreMethods  []string `json:"ignore_methods"`
+
+	// MCUB native protection
+	Mode          string   `json:"mcub_mode"`
+	DryRun        bool     `json:"mcub_dry_run"`
+	MCUBAllowlist []string `json:"mcub_allowlist"`
+	Lockdown      bool     `json:"mcub_lockdown"`
+
+	// Analytics
+	EnableAnalytics      bool    `json:"enable_analytics"`
+	ZScoreThresh         float64 `json:"zscore_threshold"`
+	WarnPercent          int     `json:"warn_percent"`
+	PredictWindow        int     `json:"predict_window"`
+	BaselineWindow       int     `json:"baseline_window"`
+	ProfileMinSamples    int     `json:"profile_min_samples"`
+	PredictAlertCooldown int     `json:"predict_alert_cooldown"`
+	WarnAlertCooldown    int     `json:"warn_alert_cooldown"`
 }
 
 func defaultAPIConfig() APIProtectionConfig {
 	return APIProtectionConfig{
-		Enabled:        true,
-		Mode:           "safe",
-		TimeSample:     30,
-		LocalFloodwait: 30,
-		Threshold:      200,
-		DryRun:         false,
-		Lockdown:       false,
-		ZScoreThresh:   3.0,
-		LimitProfile:   "normal",
+		Enabled:              true,
+		TimeSample:           30,
+		LimitProfile:         "normal",
+		Threshold:            200,
+		LocalFloodwait:       30,
+		IgnoreMethods:        []string{"GetMessagesRequest"},
+		Mode:                 "safe",
+		DryRun:               false,
+		MCUBAllowlist:        []string{},
+		Lockdown:             false,
+		EnableAnalytics:      true,
+		ZScoreThresh:         3.0,
+		WarnPercent:          90,
+		PredictWindow:        10,
+		BaselineWindow:       300,
+		ProfileMinSamples:    50,
+		PredictAlertCooldown: 10,
+		WarnAlertCooldown:    30,
 	}
 }
 
@@ -63,7 +87,7 @@ type apiProtModule struct {
 	mu  sync.Mutex
 	cfg APIProtectionConfig
 
-	requests    []apiRequestEntry
+	requests     []apiRequestEntry
 	blockedUntil float64
 	suspendUntil float64
 	triggerCount int
@@ -106,7 +130,7 @@ func (m *apiProtModule) OnUnload(k interface{}) error {
 
 func (m *apiProtModule) Commands() []loader.Command {
 	return []loader.Command{
-		{Name: "api_protection", Description: "show/configure API protection status", Handler: m.cmdAPIProtection},
+		{Name: "api_protection", Description: "show/configure API protection", Handler: m.cmdAPIProtection},
 		{Name: "api_reset", Description: "reset API protection stats and counters", Handler: m.cmdAPIReset},
 		{Name: "api_suspend", Description: "<seconds> temporarily suspend API protection", Handler: m.cmdAPISuspend},
 		{Name: "lockdown", Description: "toggle lockdown mode (blocks profile edits, chat creation, etc.)", Handler: m.cmdLockdown},
@@ -155,8 +179,10 @@ func (m *apiProtModule) profileThreshold() int {
 		return 100
 	case "aggressive":
 		return 350
-	default:
+	case "custom":
 		return m.cfg.Threshold
+	default: // "normal"
+		return 200
 	}
 }
 
@@ -178,7 +204,11 @@ func statusIcon(current, threshold int) string {
 
 // ---------- command handlers ----------
 
-// .api_protection — show current status or toggle on/off
+// .api_protection — show current status or enable/disable/set param
+// Mirrors Python api_protection.py api_protection_handler:
+//   no args  → show inline "Are you sure?" form (Go: show status panel)
+//   on/off   → enable/disable, edit with lang["api_protection_enabled/disabled"]
+//   <param> <value> → set config parameter via lang["api_param_set/error"]
 func (m *apiProtModule) cmdAPIProtection(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -186,7 +216,8 @@ func (m *apiProtModule) cmdAPIProtection(ctx context.Context, ev *events.NewMess
 	args := m.parseArgs(ev)
 
 	if len(args) == 0 {
-		// Show status.
+		// Python shows "Are you sure?" inline form. Go shows status panel
+		// (inline bot not available in the Go kernel).
 		now := float64(time.Now().UnixNano()) / 1e9
 		sample := float64(m.cfg.TimeSample)
 		recent := m.recentCount(sample)
@@ -232,53 +263,136 @@ func (m *apiProtModule) cmdAPIProtection(ctx context.Context, ev *events.NewMess
 
 	subcmd := strings.ToLower(args[0])
 	switch subcmd {
+	// Python: subcmd in ("on", "enable", "true") → lang["api_protection_enabled"]
 	case "on", "enable", "true":
 		m.cfg.Enabled = true
 		m.saveConfig()
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"🛡️ API protection <b>enabled</b>")
+			s(m.k, "api_protection", "api_protection_enabled"))
+
+	// Python: subcmd in ("off", "disable", "false") → lang["api_protection_disabled"]
 	case "off", "disable", "false":
 		m.cfg.Enabled = false
 		m.saveConfig()
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"🛡️ API protection <b>disabled</b>")
-	case "mode":
-		if len(args) < 2 {
-			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ <b>Usage:</b> <code>.api_protection mode off|safe|strict|custom</code>")
-		}
-		mode := strings.ToLower(args[1])
-		if _, ok := apiModeDescriptions[mode]; !ok {
-			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ Invalid mode. Choose: off, safe, strict, custom")
-		}
-		m.cfg.Mode = mode
-		m.cfg.Enabled = true
-		m.saveConfig()
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("🛡️ Mode set to <code>%s</code>: %s", mode, apiModeDescriptions[mode]))
-	case "threshold":
-		if len(args) < 2 {
-			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ <b>Usage:</b> <code>.api_protection threshold &lt;number&gt;</code>")
-		}
-		n, err := strconv.Atoi(args[1])
-		if err != nil || n <= 0 {
-			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ Threshold must be a positive integer")
-		}
-		m.cfg.Threshold = n
-		m.cfg.LimitProfile = "custom"
-		m.saveConfig()
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("✅ Threshold set to <code>%d</code> req/%ds", n, m.cfg.TimeSample))
+			s(m.k, "api_protection", "api_protection_disabled"))
+
 	default:
+		// Python: len(args) >= 3 → .api_protection <param> <value>
+		// supports any config key via type introspection
+		if len(args) >= 2 {
+			param := args[0]
+			value := strings.Join(args[1:], " ")
+			changed := m.setConfigParam(param, value)
+			if changed {
+				return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+					sf(m.k, "api_protection", "api_param_set", map[string]interface{}{
+						"param": param,
+						"value": value,
+					}))
+			}
+			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+				s(m.k, "api_protection", "api_param_error"))
+		}
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ <b>Usage:</b> <code>.api_protection [on|off|mode|threshold] [value]</code>")
+			s(m.k, "api_protection", "usage"))
 	}
 }
 
+// setConfigParam sets a config param by name and returns true on success.
+// Mirrors Python api_protection_handler param-setting branch.
+func (m *apiProtModule) setConfigParam(param, value string) bool {
+	switch param {
+	case "enable_protection":
+		m.cfg.Enabled = strings.ToLower(value) == "true" || value == "1" || strings.ToLower(value) == "yes"
+	case "mcub_mode":
+		if _, ok := apiModeDescriptions[value]; ok {
+			m.cfg.Mode = value
+		} else {
+			return false
+		}
+	case "limit_profile":
+		switch value {
+		case "conservative", "normal", "aggressive", "custom":
+			m.cfg.LimitProfile = value
+		default:
+			return false
+		}
+	case "custom_threshold":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return false
+		}
+		m.cfg.Threshold = n
+	case "time_sample":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return false
+		}
+		m.cfg.TimeSample = n
+	case "local_floodwait":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return false
+		}
+		m.cfg.LocalFloodwait = n
+	case "mcub_dry_run":
+		m.cfg.DryRun = strings.ToLower(value) == "true" || value == "1"
+	case "mcub_lockdown":
+		m.cfg.Lockdown = strings.ToLower(value) == "true" || value == "1"
+	case "enable_analytics":
+		m.cfg.EnableAnalytics = strings.ToLower(value) == "true" || value == "1"
+	case "zscore_threshold":
+		f, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return false
+		}
+		m.cfg.ZScoreThresh = f
+	case "warn_percent":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 || n > 100 {
+			return false
+		}
+		m.cfg.WarnPercent = n
+	case "predict_window":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return false
+		}
+		m.cfg.PredictWindow = n
+	case "baseline_window":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 10 {
+			return false
+		}
+		m.cfg.BaselineWindow = n
+	case "profile_min_samples":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return false
+		}
+		m.cfg.ProfileMinSamples = n
+	case "predict_alert_cooldown":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return false
+		}
+		m.cfg.PredictAlertCooldown = n
+	case "warn_alert_cooldown":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return false
+		}
+		m.cfg.WarnAlertCooldown = n
+	default:
+		return false
+	}
+	m.saveConfig()
+	return true
+}
+
 // .api_reset — reset counters and stats
+// Python: lang["api_reset_done"]
 func (m *apiProtModule) cmdAPIReset(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -290,10 +404,11 @@ func (m *apiProtModule) cmdAPIReset(ctx context.Context, ev *events.NewMessage) 
 	m.triggerCount = 0
 	m.mu.Unlock()
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		"✅ <b>API protection stats reset</b>")
+		s(m.k, "api_protection", "api_reset_done"))
 }
 
 // .api_suspend <seconds> — temporarily suspend protection
+// Python: lang["api_suspend"].format(seconds=seconds)
 func (m *apiProtModule) cmdAPISuspend(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -301,22 +416,27 @@ func (m *apiProtModule) cmdAPISuspend(ctx context.Context, ev *events.NewMessage
 	args := m.parseArgs(ev)
 	if len(args) == 0 || !isDigits(args[0]) {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ <b>Usage:</b> <code>.api_suspend &lt;seconds&gt;</code>")
+			s(m.k, "api_protection", "usage"))
 	}
 	seconds, err := strconv.ParseFloat(args[0], 64)
 	if err != nil || seconds <= 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ Seconds must be a positive number")
+			s(m.k, "api_protection", "usage"))
 	}
 	until := float64(time.Now().UnixNano())/1e9 + seconds
 	m.mu.Lock()
 	m.suspendUntil = until
 	m.mu.Unlock()
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("⏸️ API protection <b>suspended</b> for <code>%.0f</code> seconds", seconds))
+		sf(m.k, "api_protection", "api_suspend", map[string]interface{}{
+			"seconds": int(seconds),
+		}))
 }
 
 // .lockdown — toggle lockdown mode
+// Python outputs exactly:
+//   ok_emoji = '<tg-emoji emoji-id="5368585403467048206">🪬</tg-emoji>'
+//   f"{ok_emoji} Lockdown enabled" or f"{ok_emoji} Lockdown disabled"
 func (m *apiProtModule) cmdLockdown(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -327,12 +447,12 @@ func (m *apiProtModule) cmdLockdown(ctx context.Context, ev *events.NewMessage) 
 		m.cfg.Enabled = true
 	}
 	m.saveConfig()
+
+	const lockdownEmoji = `<tg-emoji emoji-id="5368585403467048206">🪬</tg-emoji>`
 	if m.cfg.Lockdown {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"🔒 <b>Lockdown enabled</b>\n<i>Profile edits, chat creation and other mutations are blocked.</i>")
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, lockdownEmoji+" Lockdown enabled")
 	}
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		"🔓 <b>Lockdown disabled</b>")
+	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, lockdownEmoji+" Lockdown disabled")
 }
 
 // isDigits returns true if s contains only decimal digits (optionally with a leading minus).
@@ -350,5 +470,3 @@ func isDigits(s string) bool {
 	}
 	return true
 }
-
-

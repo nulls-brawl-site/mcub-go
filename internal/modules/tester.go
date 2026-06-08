@@ -71,7 +71,7 @@ func (m *testerModule) OnUnload(k interface{}) error {
 func (m *testerModule) Commands() []loader.Command {
 	return []loader.Command{
 		{Name: "ping", Description: "check bot latency", Handler: m.cmdPing},
-		{Name: "logs", Description: "send logs file", Handler: m.cmdLogs},
+		{Name: "logs", Description: "show/clear kernel logs", Handler: m.cmdLogs},
 		{Name: "freezing", Description: "freeze userbot for N seconds", Handler: m.cmdFreezing},
 		{Name: "teaser", Description: "test a command with logging", Handler: m.cmdTeaser},
 	}
@@ -125,9 +125,19 @@ func (m *testerModule) cmdPing(ctx context.Context, ev *events.NewMessage) error
 		return nil
 	}
 
+	defer func() {
+		if r := recover(); r != nil {
+			// On any panic, try to show error_logs message
+			_ = editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+				sf(m.k, "tester", "error_logs", map[string]interface{}{"snowflake": emojiSnowflake}))
+		}
+	}()
+
 	start := time.Now()
+	// First edit: use emojiPen (matching Python's _resolve_ping_start_emoji() default = ✏️)
 	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, emojiPen); err != nil {
-		return err
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+			sf(m.k, "tester", "error_logs", map[string]interface{}{"snowflake": emojiSnowflake}))
 	}
 	pingMs := float64(time.Since(start).Microseconds()) / 1000.0
 
@@ -137,6 +147,9 @@ func (m *testerModule) cmdPing(ctx context.Context, ev *events.NewMessage) error
 	msLabel := s(m.k, "tester", "ms")
 	uptimeLabel := s(m.k, "tester", "uptime")
 
+	// Python format (no custom_text, no banner_url):
+	// f"""<blockquote>{start_emoji} <b>{strings("ping")}:</b> {ping_time} {strings("ms")}</blockquote>
+	// <blockquote>{start_emoji} <b>{strings("uptime")}:</b> {uptime}</blockquote>"""
 	resp := fmt.Sprintf(
 		`<blockquote>%s <b>%s:</b> %.2f %s</blockquote>`+"\n"+
 			`<blockquote>%s <b>%s:</b> %s</blockquote>`,
@@ -170,7 +183,7 @@ func (m *testerModule) cmdLogs(ctx context.Context, ev *events.NewMessage) error
 	info, _ := os.Stat(logPath)
 	if info != nil && info.Size() == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>%s</b>", emojiBallotBox, s(m.k, "tester", "file_empty")))
+			fmt.Sprintf("%s %s", emojiBallotBox, s(m.k, "tester", "file_empty")))
 	}
 
 	// Parse args: strip prefix + "logs"
@@ -197,7 +210,7 @@ func (m *testerModule) cmdLogs(ctx context.Context, ev *events.NewMessage) error
 				fmt.Sprintf("%s Error clearing logs: %v", emojiSnowflake, err))
 		}
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("%s <b>%s</b>", emojiBallotBox, s(m.k, "tester", "logs_clear")))
+			fmt.Sprintf("%s %s", emojiBallotBox, s(m.k, "tester", "logs_clear")))
 	}
 
 	if arg0 == "tail" {
@@ -230,6 +243,7 @@ func (m *testerModule) cmdLogs(ctx context.Context, ev *events.NewMessage) error
 }
 
 // sendLogsLevel sends the filtered kernel.log to the given peer.
+// Caption uses the logs_level_caption langpack template to match Python exactly.
 func (m *testerModule) sendLogsLevel(ctx context.Context, peerID int64, level, logPath string) error {
 	targetPath := logPath
 	var tempPath string
@@ -239,7 +253,7 @@ func (m *testerModule) sendLogsLevel(ctx context.Context, peerID int64, level, l
 		filtered, err := filterLogByLevel(logPath, strings.ToUpper(level))
 		if err != nil || filtered == "" {
 			return sendHTML(ctx, m.k, peerID,
-				fmt.Sprintf("%s <b>%s</b>", emojiBallotBox, s(m.k, "tester", "file_empty")))
+				fmt.Sprintf("%s %s", emojiBallotBox, s(m.k, "tester", "file_empty")))
 		}
 		tempPath = filtered
 		targetPath = filtered
@@ -252,16 +266,25 @@ func (m *testerModule) sendLogsLevel(ctx context.Context, peerID int64, level, l
 	}()
 
 	branch := m.detectBranch()
-	caption := fmt.Sprintf(
-		`%s <b>%s</b> MCUB`+"\n\n"+
-			`<blockquote>%s <b>%s</b> %s`+"\n"+
-			`%s <b>%s:</b> %s`+"\n"+
-			`%s <b>%s:</b> <code>%s</code></blockquote>`,
-		emojiNote, s(m.k, "tester", "logs"),
-		emojiPen, s(m.k, "tester", "kernel_version"), m.k.Version,
-		emojiSatellite, s(m.k, "tester", "branch"), branch,
-		emojiPrinter, "Level", strings.ToUpper(level),
-	)
+
+	// Use logs_level_caption langpack template (matches Python _send_logs exactly).
+	// Python passes: logs_title, logs, mcub, pen, kernel_version, version,
+	//                commit_url, commit_sha, satellite, branch_label, branch, printer, level
+	caption := sf(m.k, "tester", "logs_level_caption", map[string]interface{}{
+		"logs_title":     emojiNote,
+		"logs":           s(m.k, "tester", "logs"),
+		"mcub":           "MCUB",
+		"pen":            emojiPen,
+		"kernel_version": s(m.k, "tester", "kernel_version"),
+		"version":        m.k.Version,
+		"commit_url":     "#",
+		"commit_sha":     m.k.Version,
+		"satellite":      emojiSatellite,
+		"branch_label":   s(m.k, "tester", "branch"),
+		"branch":         branch,
+		"printer":        emojiPrinter,
+		"level":          strings.ToUpper(level),
+	})
 
 	return sendDocument(ctx, m.k, peerID, targetPath, caption)
 }
@@ -354,6 +377,7 @@ func (m *testerModule) parseArgs(ev *events.NewMessage) []string {
 
 // cmdFreezing simulates a userbot freeze by sleeping for N seconds.
 // Strings match Python tester.py cmd_freezing exactly (via langpacks).
+// Note: Python additionally disconnects/reconnects the Telegram client; Go only sleeps.
 func (m *testerModule) cmdFreezing(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -402,7 +426,8 @@ func (m *testerModule) cmdFreezing(ctx context.Context, ev *events.NewMessage) e
 
 // ---------- .teaser ----------
 
-// cmdTeaser executes a command with full event + kernel-log recording.
+// cmdTeaser executes a command with full kernel-log recording.
+// Sends a temp HTML report file matching Python tester.py cmd_teaser exactly.
 func (m *testerModule) cmdTeaser(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -420,6 +445,7 @@ func (m *testerModule) cmdTeaser(ctx context.Context, ev *events.NewMessage) err
 	}
 
 	cmdName := args[0]
+	rawText := strings.Join(args, " ")
 
 	handler, exists := m.k.CommandHandlers[cmdName]
 	if !exists {
@@ -434,20 +460,27 @@ func (m *testerModule) cmdTeaser(ctx context.Context, ev *events.NewMessage) err
 	}
 
 	if err := editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		sf(m.k, "tester", "teaser_recording", map[string]interface{}{"cmd": cmdName})); err != nil {
+		sf(m.k, "tester", "teaser_recording", map[string]interface{}{"cmd": rawText})); err != nil {
 		return err
 	}
 
-	// Build a fake event pointing to the sub-command.
-	fakeEv := &events.NewMessage{}
-	*fakeEv = *ev
-	rawText := strings.Join(args, " ")
-	fakeEv.Raw = ev.Raw // keep same message ID for edits
+	// Build a fake event with text = prefix + rawText (e.g. ".reload terminal")
+	// so the sub-command handler receives the correct command text.
+	var fakeEv *events.NewMessage
+	if ev.Raw != nil {
+		rawCopy := *ev.Raw
+		rawCopy.Message = prefix + rawText
+		fakeEv = &events.NewMessage{}
+		*fakeEv = *ev
+		fakeEv.Raw = &rawCopy
+	} else {
+		fakeEv = ev
+	}
 
-	// Execute the handler.
+	// Execute the handler (edits will go to the same message).
 	_ = handler(ctx, fakeEv)
 
-	// Gather any new kernel log entries.
+	// Gather any new kernel log entries since before handler ran.
 	newEntries := ""
 	if f, err := os.Open(logPath); err == nil {
 		if _, err2 := f.Seek(initialSize, 0); err2 == nil {
@@ -462,14 +495,33 @@ func (m *testerModule) cmdTeaser(ctx context.Context, ev *events.NewMessage) err
 		f.Close()
 	}
 
+	// Build report matching Python's report_parts structure.
+	// Python: header + event_log (or "No event calls") + kernel_log (or empty)
 	report := sf(m.k, "tester", "teaser_report_header", map[string]interface{}{"cmd": rawText})
+	// Note: Go doesn't have _FakeEventProxy so there's no event call log
+	report += "<b>No event calls recorded</b>\n"
 	if newEntries != "" {
 		report += sf(m.k, "tester", "teaser_kernel_log", map[string]interface{}{"log": newEntries})
 	} else {
 		report += s(m.k, "tester", "teaser_empty_log")
 	}
 
-	_ = report
+	// Write report to temp HTML file and send it (matches Python exactly).
+	tmp, err := os.CreateTemp("", "teaser_*.html")
+	if err == nil {
+		defer os.Remove(tmp.Name())
+		_, _ = tmp.WriteString("<html><body><pre>" + report + "</pre></body></html>")
+		_ = tmp.Close()
+
+		caption := sf(m.k, "tester", "teaser_done", map[string]interface{}{"cmd": rawText})
+		if sendErr := sendDocument(ctx, m.k, ev.PeerID, tmp.Name(), caption); sendErr != nil {
+			// Fallback: edit with caption only
+			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, caption)
+		}
+		return nil
+	}
+
+	// Fallback if temp file creation fails
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
 		sf(m.k, "tester", "teaser_done", map[string]interface{}{"cmd": rawText}))
 }

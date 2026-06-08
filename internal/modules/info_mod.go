@@ -21,6 +21,9 @@ const (
 	infoEmojiLoad      = `<tg-emoji emoji-id="5469913852462242978">🏓</tg-emoji>`
 	infoEmojiArch      = `<tg-emoji emoji-id="5361837567463399422">🪩</tg-emoji>`
 	infoEmojiUbuntu    = `<tg-emoji emoji-id="5470088387048266598">🐉</tg-emoji>`
+	infoEmojiMint      = `<tg-emoji emoji-id="6021351236240938822">🚂</tg-emoji>`
+	infoEmojiFedora    = `<tg-emoji emoji-id="5888894642400795884">🛸</tg-emoji>`
+	infoEmojiCentos    = `<tg-emoji emoji-id="5938472510755444126">🧪</tg-emoji>`
 	infoEmojiVDS       = `<tg-emoji emoji-id="5471952986970267163">🧩</tg-emoji>`
 	infoEmojiWSL       = `<tg-emoji emoji-id="5395325195542078574">🍀</tg-emoji>`
 	infoEmojiTermux    = `<tg-emoji emoji-id="5300999883996536855">🌪️</tg-emoji>`
@@ -134,6 +137,12 @@ func (m *infoModule) getDistro() (name, emoji string) {
 		emoji = infoEmojiArch
 	case strings.Contains(lname, "ubuntu"):
 		emoji = infoEmojiUbuntu
+	case strings.Contains(lname, "mint"):
+		emoji = infoEmojiMint
+	case strings.Contains(lname, "fedora"):
+		emoji = infoEmojiFedora
+	case strings.Contains(lname, "centos"):
+		emoji = infoEmojiCentos
 	}
 	return
 }
@@ -218,6 +227,25 @@ func (m *infoModule) detectCommitSHA() string {
 	return "unknown"
 }
 
+// detectCommitURL returns the GitHub commit URL for the current HEAD.
+// Mirrors Python version_manager.get_github_commit_url().
+func (m *infoModule) detectCommitURL(sha string) string {
+	out, err := exec.Command("git", "config", "--get", "remote.origin.url").Output()
+	if err != nil {
+		return ""
+	}
+	remote := strings.TrimSpace(string(out))
+	// Convert SSH to HTTPS
+	if strings.HasPrefix(remote, "git@github.com:") {
+		remote = "https://github.com/" + strings.TrimPrefix(remote, "git@github.com:")
+	}
+	remote = strings.TrimSuffix(remote, ".git")
+	if !strings.Contains(remote, "github.com") {
+		return ""
+	}
+	return remote + "/commit/" + sha
+}
+
 // checkUpdateNeeded checks if there are unpulled commits on the remote.
 func (m *infoModule) checkUpdateNeeded() bool {
 	// Run git fetch with a short timeout.
@@ -273,8 +301,17 @@ func (m *infoModule) cmdInfo(ctx context.Context, ev *events.NewMessage) error {
 		updateText = "No update needed"
 	}
 
-	// Branch display: {globe}<b> Branch {branch}#{commit_sha}</b>
-	branchDisplay := fmt.Sprintf(`%s<b> Branch %s#%s</b>`, infoEmojiGlobe, branch, commitSHA)
+	// Branch display — matches Python _build_default_text branch_display:
+	// if commit_url: `{globe}<b> Branch: {branch}</b><b><a href="{url}">#{sha}</a></b>`
+	// else:          `{globe}<b> Branch {branch}#{sha}</b>`
+	commitURL := m.detectCommitURL(commitSHA)
+	var branchDisplay string
+	if commitURL != "" {
+		branchDisplay = fmt.Sprintf(`%s<b> Branch: %s</b><b><a href="%s">#%s</a></b>`,
+			infoEmojiGlobe, branch, commitURL, commitSHA)
+	} else {
+		branchDisplay = fmt.Sprintf(`%s<b> Branch %s#%s</b>`, infoEmojiGlobe, branch, commitSHA)
+	}
 
 	// Build info text matching Python _build_default_text format exactly:
 	// <b>{mcub_emoji}</b>

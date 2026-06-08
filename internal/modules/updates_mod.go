@@ -134,14 +134,28 @@ func (m *updatesModule) cmdUpdate(ctx context.Context, ev *events.NewMessage) er
 
 	branch := m.detectBranch()
 
-	result, err := exec.Command("git", "pull", "origin", branch).CombinedOutput()
+	// Python uses subprocess.run(capture_output=True) which captures stdout only on success.
+	// Use CombinedOutput so we get stderr too for error messages, but for "Already up to date"
+	// and success output, Python uses result.stdout only.
+	gitCmd := exec.Command("git", "pull", "origin", branch)
+	var gitStdout, gitStderr strings.Builder
+	gitCmd.Stdout = &gitStdout
+	gitCmd.Stderr = &gitStderr
+	err := gitCmd.Run()
 	if err != nil {
-		// langpack error: '<tg-emoji ...>❌</tg-emoji> <b>Error:</b> <code>{error}</code>'
-		errMsg := sf(m.k, "updates", "error", map[string]interface{}{"error": err.Error()})
+		// Python: subprocess.run with returncode check is inside try/except for OS errors.
+		// If git pull returns non-zero, Python falls through without displaying anything.
+		// Go: show error message from stderr for better UX.
+		errText := gitStderr.String()
+		if errText == "" {
+			errText = err.Error()
+		}
+		errMsg := sf(m.k, "updates", "error", map[string]interface{}{"error": errText})
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, errMsg)
 	}
 
-	output := string(result)
+	// Use stdout for output display (matches Python result.stdout)
+	output := gitStdout.String()
 
 	if strings.Contains(output, "Already up to date") {
 		// langpack already_updated: '<tg-emoji ...>✅</tg-emoji> <b>Already latest version {version}</b>'

@@ -23,8 +23,10 @@ const (
 )
 
 // accessCategories defines the permission categories for trusted users.
+// Must match Python ACCESS_CATEGORIES order and keys exactly.
 var accessCategories = []string{
-	"modules", "loader", "config", "eval", "terminal", "inline", "callback", "aliases",
+	"modules", "loader", "config", "backup", "terminal", "eval",
+	"security", "system", "inline", "callback", "aliases",
 }
 
 // SGroup is a named access group that bundles users and category permissions.
@@ -129,13 +131,23 @@ func (m *trustedModule) getAccessMap(uid int64) (map[string]bool, error) {
 	result := make(map[string]bool)
 	err := m.k.DB.GetJSON(key, &result)
 	if err == sql.ErrNoRows {
-		// defaults
+		// Python defaults: all False except aliases=True (backward compatibility).
+		// modules/inline/callback become True only when explicitly saved on trust add.
 		for _, cat := range accessCategories {
-			result[cat] = (cat == "modules" || cat == "inline" || cat == "callback")
+			result[cat] = (cat == "aliases")
 		}
 		return result, nil
 	}
-	return result, err
+	if err != nil {
+		return result, err
+	}
+	// Fill any missing keys: aliases defaults True, everything else False.
+	for _, cat := range accessCategories {
+		if _, exists := result[cat]; !exists {
+			result[cat] = (cat == "aliases")
+		}
+	}
+	return result, nil
 }
 
 func (m *trustedModule) saveAccessMap(uid int64, access map[string]bool) error {
@@ -273,6 +285,8 @@ func formatDuration(seconds int64) string {
 // ---------- command handlers ----------
 
 // .trust @user/id/reply — add user to trusted list
+// Python: trust_handler shows multi-step inline form (time selection + NoNick).
+// Go: simplified direct-add (inline bot not available), using same langpack keys.
 func (m *trustedModule) cmdTrust(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -285,29 +299,28 @@ func (m *trustedModule) cmdTrust(ctx context.Context, ev *events.NewMessage) err
 	}
 	if uid == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ <b>Usage:</b> <code>.trust @user/id</code> or reply to a message")
+			s(m.k, "trusted", "usage"))
 	}
 
 	list, _ := m.getTrustedList()
 	if int64SliceContains(list, uid) {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"⚠️ User is already in the trusted list")
+			s(m.k, "trusted", "trust_already"))
 	}
 	list = append(list, uid)
 	if err := m.saveTrustedList(list); err != nil {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
 			fmt.Sprintf("❌ DB error: %v", err))
 	}
-	// Set default access.
+	// Set default access: modules, inline, callback = true (Python on_nonick default).
 	access := make(map[string]bool)
 	for _, cat := range accessCategories {
 		access[cat] = (cat == "modules" || cat == "inline" || cat == "callback")
 	}
 	_ = m.saveAccessMap(uid, access)
 
-	name := m.userDisplay(ctx, uid)
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("✅ <b>%s</b> (<code>%d</code>) added to trusted list", name, uid))
+		s(m.k, "trusted", "trust_added"))
 }
 
 // .untrust @user/id/reply — remove user from trusted list
@@ -322,13 +335,13 @@ func (m *trustedModule) cmdUntrust(ctx context.Context, ev *events.NewMessage) e
 	}
 	if uid == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ <b>Usage:</b> <code>.untrust @user/id</code> or reply to a message")
+			s(m.k, "trusted", "usage"))
 	}
 
 	list, _ := m.getTrustedList()
 	if !int64SliceContains(list, uid) {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"⚠️ User is not in the trusted list")
+			s(m.k, "trusted", "trust_not_in_list"))
 	}
 	list = removeInt64(list, uid)
 	if err := m.saveTrustedList(list); err != nil {
@@ -340,9 +353,8 @@ func (m *trustedModule) cmdUntrust(ctx context.Context, ev *events.NewMessage) e
 	nonick = removeInt64(nonick, uid)
 	_ = m.saveNonickList(nonick)
 
-	name := m.userDisplay(ctx, uid)
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("✅ <b>%s</b> (<code>%d</code>) removed from trusted list", name, uid))
+		s(m.k, "trusted", "trust_removed"))
 }
 
 // .trustlist — show all trusted users
@@ -353,10 +365,10 @@ func (m *trustedModule) cmdTrustlist(ctx context.Context, ev *events.NewMessage)
 	list, _ := m.getTrustedList()
 	if len(list) == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"📋 <b>Trusted list is empty</b>")
+			s(m.k, "trusted", "trustlist_empty"))
 	}
 	nonick, _ := m.getNonickList()
-	lines := []string{"👥 <b>Trusted Users:</b>"}
+	lines := []string{s(m.k, "trusted", "trustlist_title")}
 	for _, uid := range list {
 		name := m.userDisplay(ctx, uid)
 		nn := ""
@@ -369,6 +381,7 @@ func (m *trustedModule) cmdTrustlist(ctx context.Context, ev *events.NewMessage)
 }
 
 // .trustaccess @user/id [category on|off] — show or toggle access categories
+// Python: shows inline form with category toggle buttons. Go: text-based.
 func (m *trustedModule) cmdTrustaccess(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -380,12 +393,12 @@ func (m *trustedModule) cmdTrustaccess(ctx context.Context, ev *events.NewMessag
 	}
 	if uid == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ <b>Usage:</b> <code>.trustaccess @user/id [category on|off]</code>")
+			s(m.k, "trusted", "trustaccess_usage"))
 	}
 	list, _ := m.getTrustedList()
 	if !int64SliceContains(list, uid) {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"⚠️ User is not in the trusted list")
+			s(m.k, "trusted", "trust_not_in_list"))
 	}
 
 	access, _ := m.getAccessMap(uid)
@@ -435,18 +448,20 @@ func (m *trustedModule) cmdTrustaccess(ctx context.Context, ev *events.NewMessag
 				icon, cat, name, state))
 	}
 
-	// Show current access.
-	lines := []string{fmt.Sprintf("🔐 <b>Access for %s</b> (<code>%d</code>):", name, uid),
-		"<blockquote>"}
+	// Show current access. Python shows inline form; Go uses text.
+	title := sf(m.k, "trusted", "trustaccess_title", map[string]interface{}{"user": name})
+	lines := []string{title, "<blockquote expandable>"}
 	for _, cat := range accessCategories {
 		icon := "🚫"
+		stateWord := s(m.k, "trusted", "access_denied")
 		if access[cat] {
 			icon = "✅"
+			stateWord = s(m.k, "trusted", "access_allowed")
 		}
-		lines = append(lines, fmt.Sprintf("%s <code>%s</code>", icon, cat))
+		lines = append(lines, fmt.Sprintf("%s <code>%s</code> - <em>%s</em>", icon, cat, stateWord))
 	}
 	lines = append(lines, "</blockquote>")
-	lines = append(lines, "<i>Use .trustaccess @user category on|off to change</i>")
+	lines = append(lines, s(m.k, "trusted", "trustaccess_footer"))
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strings.Join(lines, "\n"))
 }
 
@@ -503,12 +518,12 @@ func (m *trustedModule) cmdTrustcmd(ctx context.Context, ev *events.NewMessage) 
 	}
 	if uid == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ <b>Usage:</b> <code>.trustcmd @user/id +cmdname|-cmdname|list</code>")
+			s(m.k, "trusted", "trustcmd_usage"))
 	}
 	list, _ := m.getTrustedList()
 	if !int64SliceContains(list, uid) {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"⚠️ User is not in the trusted list")
+			s(m.k, "trusted", "trust_not_in_list"))
 	}
 
 	name := m.userDisplay(ctx, uid)
@@ -524,15 +539,18 @@ func (m *trustedModule) cmdTrustcmd(ctx context.Context, ev *events.NewMessage) 
 		cmdAccess, _ := m.getCmdAccessMap(uid)
 		if len(cmdAccess) == 0 {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("📋 No per-command overrides for <b>%s</b>", name))
+				s(m.k, "trusted", "trustcmd_list_empty"))
 		}
-		lines := []string{fmt.Sprintf("📋 <b>Per-command access for %s:</b>", name), "<blockquote>"}
+		title := sf(m.k, "trusted", "trustcmd_list_title", map[string]interface{}{"user": name})
+		lines := []string{title, "<blockquote>"}
 		for cmd, allowed := range cmdAccess {
 			icon := "✅"
+			stateWord := s(m.k, "trusted", "access_allowed")
 			if !allowed {
 				icon = "🚫"
+				stateWord = s(m.k, "trusted", "access_denied")
 			}
-			lines = append(lines, fmt.Sprintf("%s <code>%s</code>", icon, cmd))
+			lines = append(lines, fmt.Sprintf("%s <code>%s</code> - <em>%s</em>", icon, cmd, stateWord))
 		}
 		lines = append(lines, "</blockquote>")
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strings.Join(lines, "\n"))
@@ -549,7 +567,12 @@ func (m *trustedModule) cmdTrustcmd(ctx context.Context, ev *events.NewMessage) 
 		cmdName = arg[1:]
 	} else {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ <b>Usage:</b> <code>.trustcmd @user/id +cmdname</code> or <code>-cmdname</code>")
+			s(m.k, "trusted", "trustcmd_usage"))
+	}
+
+	if cmdName == "" {
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+			s(m.k, "trusted", "trustcmd_usage"))
 	}
 
 	cmdAccess, _ := m.getCmdAccessMap(uid)
@@ -558,14 +581,17 @@ func (m *trustedModule) cmdTrustcmd(ctx context.Context, ev *events.NewMessage) 
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
 			fmt.Sprintf("❌ DB error: %v", err))
 	}
-	icon := "✅"
-	action := "allowed"
-	if !allow {
-		icon = "🚫"
-		action = "blocked"
+	var statusKey string
+	if allow {
+		statusKey = "trustcmd_added"
+	} else {
+		statusKey = "trustcmd_removed"
 	}
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("%s Command <code>%s</code> %s for <b>%s</b>", icon, cmdName, action, name))
+		sf(m.k, "trusted", statusKey, map[string]interface{}{
+			"cmd":  cmdName,
+			"user": name,
+		}))
 }
 
 // .nonickuser @user/id — toggle NoNick mode for trusted user
@@ -580,12 +606,12 @@ func (m *trustedModule) cmdNonickuser(ctx context.Context, ev *events.NewMessage
 	}
 	if uid == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ <b>Usage:</b> <code>.nonickuser @user/id</code> or reply")
+			s(m.k, "trusted", "nonick_usage"))
 	}
 	list, _ := m.getTrustedList()
 	if !int64SliceContains(list, uid) {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"⚠️ User is not in the trusted list")
+			s(m.k, "trusted", "trust_not_in_list"))
 	}
 	nonick, _ := m.getNonickList()
 	name := m.userDisplay(ctx, uid)
@@ -593,12 +619,12 @@ func (m *trustedModule) cmdNonickuser(ctx context.Context, ev *events.NewMessage
 		nonick = removeInt64(nonick, uid)
 		_ = m.saveNonickList(nonick)
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("🔑 NoNick <b>disabled</b> for <b>%s</b>", name))
+			sf(m.k, "trusted", "nonick_toggled_off", map[string]interface{}{"name": name}))
 	}
 	nonick = append(nonick, uid)
 	_ = m.saveNonickList(nonick)
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("🔑 NoNick <b>enabled</b> for <b>%s</b>", name))
+		sf(m.k, "trusted", "nonick_toggled_on", map[string]interface{}{"name": name}))
 }
 
 // .nonickusers — list users with NoNick enabled
@@ -609,9 +635,9 @@ func (m *trustedModule) cmdNonickusers(ctx context.Context, ev *events.NewMessag
 	nonick, _ := m.getNonickList()
 	if len(nonick) == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"📋 <b>No users with NoNick enabled</b>")
+			s(m.k, "trusted", "nonick_list_empty"))
 	}
-	lines := []string{"🔑 <b>Users with NoNick:</b>"}
+	lines := []string{s(m.k, "trusted", "nonick_list_title")}
 	for _, uid := range nonick {
 		name := m.userDisplay(ctx, uid)
 		lines = append(lines, fmt.Sprintf("• %s (<code>%d</code>)", name, uid))
@@ -619,32 +645,42 @@ func (m *trustedModule) cmdNonickusers(ctx context.Context, ev *events.NewMessag
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strings.Join(lines, "\n"))
 }
 
-// .watchers — list active event watchers (Go kernel note)
+// .watchers — list active event watchers
+// Python iterates kernel.register.get_watchers() and shows module.func + direction + status.
+// Go kernel uses a middleware chain; we report the count as the nearest equivalent.
 func (m *trustedModule) cmdWatchers(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
-	// The Go kernel uses a middleware chain rather than named watchers.
-	// Report the middleware count as a proxy.
 	mws := m.k.Middlewares()
 	if len(mws) == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"👁 <b>Watchers:</b> none registered\n<i>Go kernel uses middleware chain</i>")
+			s(m.k, "trusted", "watchers_empty"))
 	}
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf("👁 <b>Watchers:</b> %d middleware(s) active\n<i>Go kernel uses middleware chain</i>",
-			len(mws)))
+	title := s(m.k, "trusted", "watchers_title")
+	lines := []string{
+		title + "<blockquote expandable>",
+		fmt.Sprintf("<i>%d middleware(s) active (Go kernel uses middleware chain)</i>", len(mws)),
+		"</blockquote>",
+	}
+	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strings.Join(lines, "\n"))
 }
 
 // .watchersdebug — debug watcher/middleware info
+// Python shows filter text, bound/enabled status for each watcher.
+// Go equivalent shows middleware chain details.
 func (m *trustedModule) cmdWatchersdebug(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
 	mws := m.k.Middlewares()
+	if len(mws) == 0 {
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+			s(m.k, "trusted", "watchers_debug_empty"))
+	}
+	title := s(m.k, "trusted", "watchers_debug_title")
 	lines := []string{
-		"🔍 <b>Watcher Debug</b>",
-		"<blockquote expandable>",
+		title + "<blockquote expandable>",
 		fmt.Sprintf("Middleware chain length: <code>%d</code>", len(mws)),
 		fmt.Sprintf("Loaded modules: <code>%d</code>", len(m.k.LoadedModules)+len(m.k.SystemModules)),
 		"<i>Go kernel uses typed middleware chain rather than named watchers</i>",
@@ -653,14 +689,26 @@ func (m *trustedModule) cmdWatchersdebug(ctx context.Context, ev *events.NewMess
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strings.Join(lines, "\n"))
 }
 
-// .watcher <name> on|off — toggle named watcher (stub for Go kernel)
+// .watcher <module> <watcher> — enable/disable specific watcher
+// Python: calls kernel.register.disable_watcher/enable_watcher.
+// Go: named watcher control is not available; return usage hint with langpack string.
 func (m *trustedModule) cmdWatcher(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
 	}
+	args := m.parseArgs(ev)
+	if len(args) < 2 {
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
+			s(m.k, "trusted", "watcher_usage"))
+	}
+	moduleName := args[0]
+	watcherName := args[1]
+	// Named watcher toggle not available in Go kernel.
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		"⚠️ Named watcher control is not available in the Go kernel.\n"+
-			"<i>Use .modules to manage modules instead.</i>")
+		sf(m.k, "trusted", "watcher_not_found", map[string]interface{}{
+			"module":  moduleName,
+			"watcher": watcherName,
+		}))
 }
 
 // .timedtrusted — show temporary trusted users with expiry
@@ -713,25 +761,32 @@ func (m *trustedModule) cmdTimedtrusted(ctx context.Context, ev *events.NewMessa
 	expMap, _ := m.getExpiredMap()
 	if len(expMap) == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"⏰ <b>No timed trusted users</b>")
+			s(m.k, "trusted", "timed_trusted_empty"))
 	}
 	now := time.Now().Unix()
-	lines := []string{"⏰ <b>Timed Trusted Users:</b>"}
+	lines := []string{s(m.k, "trusted", "timed_trusted_title")}
 	for uidStr, expiry := range expMap {
 		uid, _ := strconv.ParseInt(uidStr, 10, 64)
 		name := m.userDisplay(ctx, uid)
 		remaining := expiry - now
-		if remaining <= 0 {
-			lines = append(lines, fmt.Sprintf("• %s (<code>%d</code>) — <i>expired</i>", name, uid))
-		} else {
-			dur := formatDuration(remaining)
-			lines = append(lines, fmt.Sprintf("• %s (<code>%d</code>) — expires in %s", name, uid, dur))
+		if remaining > 0 {
+			var timeStr string
+			if remaining >= 86400 {
+				timeStr = fmt.Sprintf("%dd", remaining/86400)
+			} else if remaining >= 3600 {
+				timeStr = fmt.Sprintf("%dh", remaining/3600)
+			} else {
+				timeStr = fmt.Sprintf("%dm", remaining/60)
+			}
+			expStr := sf(m.k, "trusted", "trust_expiring", map[string]interface{}{"time": timeStr})
+			lines = append(lines, fmt.Sprintf("• %s (<code>%d</code>)%s", name, uid, expStr))
 		}
 	}
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strings.Join(lines, "\n"))
 }
 
 // .sgroup create|delete|add|remove|access|list|info <name> [args...] — manage access groups
+// Python: uses inline forms for access editing. Go: text-based fallback.
 func (m *trustedModule) cmdSgroup(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -739,7 +794,7 @@ func (m *trustedModule) cmdSgroup(ctx context.Context, ev *events.NewMessage) er
 	args := m.parseArgs(ev)
 	if len(args) == 0 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ <b>Usage:</b> <code>.sgroup create|delete|add|remove|access|list|info [name] [args]</code>")
+			s(m.k, "trusted", "sgroup_usage"))
 	}
 
 	action := strings.ToLower(args[0])
@@ -749,9 +804,9 @@ func (m *trustedModule) cmdSgroup(ctx context.Context, ev *events.NewMessage) er
 	case "list":
 		if len(groups) == 0 {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"📋 <b>No access groups defined</b>")
+				s(m.k, "trusted", "sgroup_list_empty"))
 		}
-		lines := []string{"📋 <b>Access Groups:</b>"}
+		lines := []string{s(m.k, "trusted", "sgroup_list_title")}
 		for gname, gdata := range groups {
 			accessOn := 0
 			for _, v := range gdata.Access {
@@ -759,7 +814,7 @@ func (m *trustedModule) cmdSgroup(ctx context.Context, ev *events.NewMessage) er
 					accessOn++
 				}
 			}
-			lines = append(lines, fmt.Sprintf("• <b>%s</b> — %d users, %d categories on",
+			lines = append(lines, fmt.Sprintf("• <b>%s</b> - %d users, %d access",
 				gname, len(gdata.Users), accessOn))
 		}
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strings.Join(lines, "\n"))
@@ -767,12 +822,12 @@ func (m *trustedModule) cmdSgroup(ctx context.Context, ev *events.NewMessage) er
 	case "create":
 		if len(args) < 2 {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ <b>Usage:</b> <code>.sgroup create &lt;name&gt;</code>")
+				s(m.k, "trusted", "sgroup_usage"))
 		}
 		name := args[1]
 		if _, exists := groups[name]; exists {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("⚠️ Group <b>%s</b> already exists", name))
+				sf(m.k, "trusted", "sgroup_already_exists", map[string]interface{}{"name": name}))
 		}
 		access := make(map[string]bool)
 		for _, cat := range accessCategories {
@@ -781,87 +836,87 @@ func (m *trustedModule) cmdSgroup(ctx context.Context, ev *events.NewMessage) er
 		groups[name] = SGroup{Users: []int64{}, Access: access}
 		_ = m.saveSgroups(groups)
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("✅ Group <b>%s</b> created", name))
+			sf(m.k, "trusted", "sgroup_created", map[string]interface{}{"name": name}))
 
 	case "delete":
 		if len(args) < 2 {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ <b>Usage:</b> <code>.sgroup delete &lt;name&gt;</code>")
+				s(m.k, "trusted", "sgroup_usage"))
 		}
 		name := args[1]
 		if _, exists := groups[name]; !exists {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("⚠️ Group <b>%s</b> not found", name))
+				sf(m.k, "trusted", "sgroup_not_found", map[string]interface{}{"name": name}))
 		}
 		delete(groups, name)
 		_ = m.saveSgroups(groups)
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("✅ Group <b>%s</b> deleted", name))
+			sf(m.k, "trusted", "sgroup_deleted", map[string]interface{}{"name": name}))
 
 	case "add":
 		if len(args) < 3 {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ <b>Usage:</b> <code>.sgroup add &lt;name&gt; @user/id</code>")
+				s(m.k, "trusted", "sgroup_usage"))
 		}
 		gname := args[1]
 		g, exists := groups[gname]
 		if !exists {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("⚠️ Group <b>%s</b> not found", gname))
+				sf(m.k, "trusted", "sgroup_not_found", map[string]interface{}{"name": gname}))
 		}
 		uid, err := m.resolveUserID(ctx, ev, args[2:])
 		if err != nil || uid == 0 {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ Could not resolve user")
+				s(m.k, "trusted", "sgroup_usage"))
 		}
 		if int64SliceContains(g.Users, uid) {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"⚠️ User already in group")
+				s(m.k, "trusted", "sgroup_user_in_group"))
 		}
 		g.Users = append(g.Users, uid)
 		groups[gname] = g
 		_ = m.saveSgroups(groups)
-		name := m.userDisplay(ctx, uid)
+		userName := m.userDisplay(ctx, uid)
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("✅ <b>%s</b> added to group <b>%s</b>", name, gname))
+			sf(m.k, "trusted", "sgroup_user_added", map[string]interface{}{"user": userName, "group": gname}))
 
 	case "remove":
 		if len(args) < 3 {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ <b>Usage:</b> <code>.sgroup remove &lt;name&gt; @user/id</code>")
+				s(m.k, "trusted", "sgroup_usage"))
 		}
 		gname := args[1]
 		g, exists := groups[gname]
 		if !exists {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("⚠️ Group <b>%s</b> not found", gname))
+				sf(m.k, "trusted", "sgroup_not_found", map[string]interface{}{"name": gname}))
 		}
 		uid, err := m.resolveUserID(ctx, ev, args[2:])
 		if err != nil || uid == 0 {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ Could not resolve user")
+				s(m.k, "trusted", "sgroup_usage"))
 		}
 		if !int64SliceContains(g.Users, uid) {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"⚠️ User not in group")
+				s(m.k, "trusted", "sgroup_user_not_in_group"))
 		}
 		g.Users = removeInt64(g.Users, uid)
 		groups[gname] = g
 		_ = m.saveSgroups(groups)
-		name := m.userDisplay(ctx, uid)
+		userName := m.userDisplay(ctx, uid)
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf("✅ <b>%s</b> removed from group <b>%s</b>", name, gname))
+			sf(m.k, "trusted", "sgroup_user_removed", map[string]interface{}{"user": userName, "group": gname}))
 
 	case "access":
 		if len(args) < 2 {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ <b>Usage:</b> <code>.sgroup access &lt;name&gt; [category on|off]</code>")
+				s(m.k, "trusted", "sgroup_usage"))
 		}
 		gname := args[1]
 		g, exists := groups[gname]
 		if !exists {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("⚠️ Group <b>%s</b> not found", gname))
+				sf(m.k, "trusted", "sgroup_not_found", map[string]interface{}{"name": gname}))
 		}
 		if len(args) >= 4 {
 			cat := strings.ToLower(args[2])
@@ -875,7 +930,7 @@ func (m *trustedModule) cmdSgroup(ctx context.Context, ev *events.NewMessage) er
 			}
 			if !validCat {
 				return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-					fmt.Sprintf("❌ Unknown category <code>%s</code>", cat))
+					s(m.k, "trusted", "sgroup_usage"))
 			}
 			if g.Access == nil {
 				g.Access = make(map[string]bool)
@@ -887,49 +942,55 @@ func (m *trustedModule) cmdSgroup(ctx context.Context, ev *events.NewMessage) er
 				g.Access[cat] = false
 			default:
 				return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-					"❌ State must be <code>on</code> or <code>off</code>")
+					s(m.k, "trusted", "sgroup_usage"))
 			}
 			groups[gname] = g
 			_ = m.saveSgroups(groups)
 			icon := "✅"
+			stateWord := s(m.k, "trusted", "access_allowed")
 			if !g.Access[cat] {
 				icon = "🚫"
+				stateWord = s(m.k, "trusted", "access_denied")
 			}
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("%s <code>%s</code> for group <b>%s</b>", icon, cat, gname))
+				fmt.Sprintf("%s <code>%s</code> for group <b>%s</b> — %s", icon, cat, gname, stateWord))
 		}
-		// Show access list.
-		lines := []string{fmt.Sprintf("🔐 <b>Access for group %s:</b>", gname), "<blockquote>"}
+		// Show access list for group.
+		lines := []string{fmt.Sprintf("🔐 <b>Access for group %s:</b>", gname), "<blockquote expandable>"}
 		for _, cat := range accessCategories {
 			icon := "🚫"
+			stateWord := s(m.k, "trusted", "access_denied")
 			if g.Access[cat] {
 				icon = "✅"
+				stateWord = s(m.k, "trusted", "access_allowed")
 			}
-			lines = append(lines, fmt.Sprintf("%s <code>%s</code>", icon, cat))
+			lines = append(lines, fmt.Sprintf("%s <code>%s</code> - <em>%s</em>", icon, cat, stateWord))
 		}
 		lines = append(lines, "</blockquote>")
+		lines = append(lines, s(m.k, "trusted", "trustaccess_footer"))
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strings.Join(lines, "\n"))
 
 	case "info":
 		if len(args) < 2 {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				"❌ <b>Usage:</b> <code>.sgroup info &lt;name&gt;</code>")
+				s(m.k, "trusted", "sgroup_usage"))
 		}
 		gname := args[1]
 		g, exists := groups[gname]
 		if !exists {
 			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("⚠️ Group <b>%s</b> not found", gname))
+				sf(m.k, "trusted", "sgroup_not_found", map[string]interface{}{"name": gname}))
 		}
-		lines := []string{fmt.Sprintf("📋 <b>Group: %s</b>", gname)}
+		title := sf(m.k, "trusted", "sgroup_menu_title", map[string]interface{}{"name": gname})
+		lines := []string{title}
 		if len(g.Users) > 0 {
 			lines = append(lines, "\n<b>Users:</b>")
 			for _, uid := range g.Users {
-				name := m.userDisplay(ctx, uid)
-				lines = append(lines, fmt.Sprintf("• %s (<code>%d</code>)", name, uid))
+				userName := m.userDisplay(ctx, uid)
+				lines = append(lines, fmt.Sprintf("• %s (<code>%d</code>)", userName, uid))
 			}
 		} else {
-			lines = append(lines, "\n<b>Users:</b> none")
+			lines = append(lines, "\n<b>Users:</b> - "+s(m.k, "trusted", "sgroup_info_users_empty"))
 		}
 		accessOn := []string{}
 		for cat, on := range g.Access {
@@ -940,13 +1001,13 @@ func (m *trustedModule) cmdSgroup(ctx context.Context, ev *events.NewMessage) er
 		if len(accessOn) > 0 {
 			lines = append(lines, fmt.Sprintf("\n<b>Access:</b> %s", strings.Join(accessOn, ", ")))
 		} else {
-			lines = append(lines, "\n<b>Access:</b> none")
+			lines = append(lines, "\n<b>Access:</b> "+s(m.k, "trusted", "sgroup_info_access_empty"))
 		}
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, strings.Join(lines, "\n"))
 
 	default:
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			"❌ <b>Usage:</b> <code>.sgroup create|delete|add|remove|access|list|info [name] [args]</code>")
+			s(m.k, "trusted", "sgroup_usage"))
 	}
 }
 

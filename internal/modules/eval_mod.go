@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -19,9 +20,9 @@ import (
 
 // Custom emoji IDs for the eval module (exact from Python source).
 const (
-	emojiEvalOrb    = `<tg-emoji emoji-id="5426900601101374618">🧿</tg-emoji>`
-	emojiEvalError  = `<tg-emoji emoji-id="5388785832956016892">❌</tg-emoji>`
-	emojiEvalDNA    = `<tg-emoji emoji-id="5368513458469878442">🧬</tg-emoji>`
+	emojiEvalOrb     = `<tg-emoji emoji-id="5426900601101374618">🧿</tg-emoji>`
+	emojiEvalError   = `<tg-emoji emoji-id="5388785832956016892">❌</tg-emoji>`
+	emojiEvalDNA     = `<tg-emoji emoji-id="5368513458469878442">🧬</tg-emoji>`
 	emojiEvalDiamond = `<tg-emoji emoji-id="5404366668635865453">💠</tg-emoji>`
 )
 
@@ -105,6 +106,7 @@ func (m *evalModule) Commands() []loader.Command {
 // ---------- .py ----------
 
 // cmdPy executes Python code via a subprocess and displays the result.
+// Output format matches Python eval.py cmd_py exactly.
 func (m *evalModule) cmdPy(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev.Raw == nil {
 		return nil
@@ -114,7 +116,7 @@ func (m *evalModule) cmdPy(ctx context.Context, ev *events.NewMessage) error {
 	code := strings.TrimSpace(getArgsRaw(ev, m.k))
 	// Unescape HTML entities (the message may contain &amp; etc.)
 	code = html.UnescapeString(code)
-	// Replace non-breaking spaces.
+	// Replace non-breaking spaces (matches Python: .replace("\u00a0", " "))
 	code = strings.ReplaceAll(code, "\u00a0", " ")
 
 	if code == "" {
@@ -136,60 +138,117 @@ func (m *evalModule) cmdPy(ctx context.Context, ev *events.NewMessage) error {
 		output = "[no output]"
 	}
 
-	codeDisplay := html.EscapeString(code)
-	if len([]rune(codeDisplay)) > 1000 {
-		runes := []rune(codeDisplay)
-		codeDisplay = string(runes[:1000]) + "..."
+	// Truncate code display: Python does code[:1000] FIRST (raw), then html.escape.
+	// Matches: code_display = html.escape(code[:1000]) + ("..." if len(code) > 1000 else "")
+	codeRaw := code
+	suffix := ""
+	if len([]rune(codeRaw)) > 1000 {
+		runes := []rune(codeRaw)
+		codeRaw = string(runes[:1000])
+		suffix = "..."
+	}
+	codeDisplay := html.EscapeString(codeRaw) + suffix
+
+	// Elapsed string: Python uses f"{elapsed}{s['ms']}" – NO space between number and unit
+	elapsedStr := fmt.Sprintf("%.2f", elapsed)
+	msLabel := s(m.k, "eval", "ms") // "ms" or "мс"
+
+	// result_text for display
+	resultText := output
+	if len(resultText) > 4000 {
+		// Send result as a file (matches Python: len(result_text) > 4000)
+		return m.sendResultAsFile(ctx, ev, code, output, codeDisplay, elapsedStr, msLabel)
 	}
 
-	elapsedStr := fmt.Sprintf("%.2f", elapsed)
-
-	// Build response.
-	const maxResult = 4000
-
+	// Build result block:
+	// If error: <blockquote expandable>{result_text}</blockquote>  (no <code>, since may contain HTML)
+	// If ok:    <blockquote expandable><code>{html.escape(result_text)}</code></blockquote>
 	var resultBlock string
 	if isError {
-		resultBlock = fmt.Sprintf(
-			"<blockquote expandable>%s</blockquote>",
-			html.EscapeString(output),
-		)
+		// Python puts pre-formatted HTML (with ❌) in result_text for errors,
+		// so it's used raw. In Go, output is plain text traceback – escape it.
+		resultBlock = fmt.Sprintf("<blockquote expandable>%s</blockquote>",
+			html.EscapeString(resultText))
 	} else {
-		resultBlock = fmt.Sprintf(
-			"<blockquote expandable><code>%s</code></blockquote>",
-			html.EscapeString(output),
-		)
+		resultBlock = fmt.Sprintf("<blockquote expandable><code>%s</code></blockquote>",
+			html.EscapeString(resultText))
 	}
 
+	// Python format (result in message):
+	// f"""{🧿} <b>{s["code"]}</b>
+	// <blockquote expandable><code>{code_display}</code></blockquote>
+	// {🧬} <b>{s["result_in_message"]}</b>
+	// {result_block}
+	// <blockquote>{💠} <i>{s["executed_in"]}</i> <code>{elapsed}{ms}</code></blockquote>"""
 	response := fmt.Sprintf(
-		"%s <b>Code</b>\n"+
+		"%s <b>%s</b>\n"+
 			"<blockquote expandable><code>%s</code></blockquote>\n"+
-			"%s <b>Result</b>\n"+
+			"%s <b>%s</b>\n"+
 			"%s\n"+
-			"<blockquote>%s <i>Executed in</i> <code>%s ms</code></blockquote>",
-		emojiEvalOrb, codeDisplay,
-		emojiEvalDNA, resultBlock,
-		emojiEvalDiamond, elapsedStr,
+			"<blockquote>%s <i>%s</i> <code>%s%s</code></blockquote>",
+		emojiEvalOrb, s(m.k, "eval", "code"),
+		codeDisplay,
+		emojiEvalDNA, s(m.k, "eval", "result_in_message"),
+		resultBlock,
+		emojiEvalDiamond, s(m.k, "eval", "executed_in"), elapsedStr, msLabel,
 	)
-
-	if len(response) > maxResult {
-		// Send output as file instead.
-		response = fmt.Sprintf(
-			"%s <b>Code</b>\n"+
-				"<blockquote expandable><code>%s</code></blockquote>\n"+
-				"%s <b>Result (see file)</b>\n"+
-				"<blockquote>%s <i>Executed in</i> <code>%s ms</code></blockquote>",
-			emojiEvalOrb, codeDisplay,
-			emojiEvalDNA,
-			emojiEvalDiamond, elapsedStr,
-		)
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, response)
-	}
 
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, response)
 }
 
+// sendResultAsFile sends the eval result as a document attachment when it exceeds 4000 chars.
+// Matches Python: creates BytesIO file named "eval_result.txt" and edits message with file.
+func (m *evalModule) sendResultAsFile(
+	ctx context.Context,
+	ev *events.NewMessage,
+	code, output, codeDisplay, elapsedStr, msLabel string,
+) error {
+	// Write content to temp file
+	tmp, err := os.CreateTemp("", "eval_result_*.txt")
+	if err != nil {
+		// Fallback: show caption without file
+		caption := fmt.Sprintf(
+			"%s <b>%s</b>\n"+
+				"<blockquote expandable><code>%s</code></blockquote>\n"+
+				"%s <b>%s</b>\n"+
+				"<blockquote>%s <i>%s</i> <code>%s%s</code></blockquote>",
+			emojiEvalOrb, s(m.k, "eval", "code"),
+			codeDisplay,
+			emojiEvalDNA, s(m.k, "eval", "result_file"),
+			emojiEvalDiamond, s(m.k, "eval", "executed_in"), elapsedStr, msLabel,
+		)
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, caption)
+	}
+	defer os.Remove(tmp.Name())
+
+	_, _ = tmp.WriteString(output)
+	_ = tmp.Close()
+
+	// Caption matches Python format:
+	// f"""{🧿} <b>{s["code"]}</b>
+	// <blockquote expandable><code>{code_display}</code></blockquote>
+	// {🧬} <b>{s["result_file"]}</b>
+	// <blockquote>{💠} <i>{s["executed_in"]}</i> <code>{elapsed}{ms}</code></blockquote>"""
+	caption := fmt.Sprintf(
+		"%s <b>%s</b>\n"+
+			"<blockquote expandable><code>%s</code></blockquote>\n"+
+			"%s <b>%s</b>\n"+
+			"<blockquote>%s <i>%s</i> <code>%s%s</code></blockquote>",
+		emojiEvalOrb, s(m.k, "eval", "code"),
+		codeDisplay,
+		emojiEvalDNA, s(m.k, "eval", "result_file"),
+		emojiEvalDiamond, s(m.k, "eval", "executed_in"), elapsedStr, msLabel,
+	)
+
+	// Try to send as document; on failure, fall back to edit without file
+	if err := sendDocument(ctx, m.k, ev.PeerID, tmp.Name(), caption); err != nil {
+		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, caption)
+	}
+	return nil
+}
+
 // execPython runs the given Python code via a python3 subprocess.
-// It returns the captured output and whether an error occurred.
+// Returns the captured output and whether an error occurred.
 func (m *evalModule) execPython(ctx context.Context, code string) (output string, isError bool) {
 	cmd := exec.CommandContext(ctx, "python3", "-c", pyExecWrapper)
 	cmd.Stdin = strings.NewReader(code)

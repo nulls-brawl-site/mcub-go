@@ -65,19 +65,20 @@ func (m *settingsModule) OnUnload(k interface{}) error {
 // Commands implements loader.Module.
 func (m *settingsModule) Commands() []loader.Command {
 	return []loader.Command{
-		{Name: "setprefix", Description: "[prefix] [id/@username/reply] change owner prefix", Handler: m.cmdSetPrefix},
-		{Name: "addalias", Description: "[alias]=[cmd] add command alias", Handler: m.cmdAddAlias},
-		{Name: "delalias", Description: "[alias] delete command alias", Handler: m.cmdDelAlias},
+		{Name: "setprefix", Description: "[prefix] [id/@username/reply] - change owner prefix", Handler: m.cmdSetPrefix},
+		{Name: "addalias", Description: "[alias]=[command] - add command alias", Handler: m.cmdAddAlias},
+		{Name: "delalias", Description: "[alias] - delete command alias", Handler: m.cmdDelAlias},
 		{Name: "aliases", Description: "list all command aliases", Handler: m.cmdAliases},
-		{Name: "iloadalias", Description: "[url/reply] import aliases from JSON", Handler: m.cmdIloadAlias},
+		{Name: "iloadalias", Description: "[url / reply to file] - import aliases from JSON", Handler: m.cmdIloadAlias},
+		{Name: "ila", Description: "[url / reply to file] - import aliases from JSON", Handler: m.cmdIloadAlias},
 		{Name: "unla", Description: "export aliases to JSON file", Handler: m.cmdUnla},
-		{Name: "lang", Description: "[ru/en/...] change bot language", Handler: m.cmdLang},
-		{Name: "cleardb", Description: "delete database file (add --yes to confirm)", Handler: m.cmdClearDB},
-		{Name: "clearmodules", Description: "delete all user modules (add --yes to confirm)", Handler: m.cmdClearModules},
-		{Name: "clearcache", Description: "clear kernel cache (add --yes to confirm)", Handler: m.cmdClearCache},
+		{Name: "lang", Description: "[ru/en] - switch userbot language", Handler: m.cmdLang},
+		{Name: "cleardb", Description: "delete database file", Handler: m.cmdClearDB},
+		{Name: "clearmodules", Description: "delete all user modules", Handler: m.cmdClearModules},
+		{Name: "clearcache", Description: "clear kernel cache", Handler: m.cmdClearCache},
 		{Name: "mcubinfo", Description: "what is a userbot", Handler: m.cmdMcubInfo},
-		{Name: "piped", Description: "[on/off] toggle pipeline mode", Handler: m.cmdPiped},
-		{Name: "mcub", Description: "show MCUB version info", Handler: m.cmdMcub},
+		{Name: "piped", Description: "[on/off] - enable/disable command pipeline", Handler: m.cmdPiped},
+		{Name: "mcub", Description: "Info MCUB", Handler: m.cmdMcub},
 	}
 }
 
@@ -194,7 +195,17 @@ func (m *settingsModule) cmdSetPrefix(ctx context.Context, ev *events.NewMessage
 	}
 
 	newPrefix := args[0]
-	if len([]rune(newPrefix)) != 1 {
+
+	// Check settings_any_prefix config — allows multi-character prefixes.
+	anyPrefix := false
+	if m.k != nil && m.k.Config != nil {
+		if modCfg, err := m.k.Config.GetModuleConfig("settings", nil); err == nil && modCfg != nil {
+			if v, ok := modCfg["settings_any_prefix"].(bool); ok {
+				anyPrefix = v
+			}
+		}
+	}
+	if !anyPrefix && len([]rune(newPrefix)) != 1 {
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("prefix_one_char"))
 	}
 
@@ -239,14 +250,7 @@ func (m *settingsModule) cmdSetPrefix(ctx context.Context, ev *events.NewMessage
 			fmt.Sprintf("❌ Error saving config: %s", html.EscapeString(err.Error())))
 	}
 
-	if targetID == m.k.AdminID {
-		// Use prefix_changed for own prefix.
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			m.sf("prefix_changed",
-				"{prefix}", html.EscapeString(newPrefix),
-				"{prefix_old}", html.EscapeString(oldPrefix)))
-	}
-	// Use prefix_owner_changed for others.
+	// Python always uses prefix_owner_changed (shows owner_id, old, new prefix).
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
 		m.sf("prefix_owner_changed",
 			"{owner_id}", html.EscapeString(key),
@@ -340,7 +344,7 @@ func (m *settingsModule) cmdAliases(ctx context.Context, ev *events.NewMessage) 
 	for _, alias := range keys {
 		target := m.k.Aliases[alias]
 		lines = append(lines,
-			fmt.Sprintf("<code>%s%s </code>→<code> %s%s</code>",
+			fmt.Sprintf("<code>%s%s </code>-><code> %s%s</code>",
 				html.EscapeString(prefix), html.EscapeString(alias),
 				html.EscapeString(prefix), html.EscapeString(target)))
 	}
@@ -485,15 +489,10 @@ func (m *settingsModule) cmdLang(ctx context.Context, ev *events.NewMessage) err
 	args := strings.Fields(getArgsRaw(ev, m.k))
 
 	if len(args) == 0 {
-		current := m.k.Config.Language
-		if current == "" {
-			current = "en"
-		}
-		// Show current language and available ones.
+		// Python shows inline language-selection buttons; Go falls back to a
+		// plain text listing using the same select_language string.
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			fmt.Sprintf(`<tg-emoji emoji-id="5397575638146110953">🌎</tg-emoji> <b>Language:</b> <code>%s</code>`+"\nAvailable: %s",
-				html.EscapeString(current),
-				strings.Join(settingsAvailableLangs, ", ")))
+			m.sf("select_language")+"\n"+strings.Join(settingsAvailableLangs, ", "))
 	}
 
 	newLang := strings.ToLower(args[0])
@@ -615,21 +614,9 @@ func (m *settingsModule) cmdMcubInfo(ctx context.Context, ev *events.NewMessage)
 // ---------- .piped ----------
 
 func (m *settingsModule) cmdPiped(ctx context.Context, ev *events.NewMessage) error {
+	// Python toggles the current state when called without args.
+	// Go supports optional [on/off] args for explicit control.
 	raw := strings.TrimSpace(getArgsRaw(ev, m.k))
-
-	if raw == "" {
-		// Toggle current state.
-		current := m.k.Config.Piped
-		m.k.Config.Piped = !current
-		if err := m.saveConfig(); err != nil {
-			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-				fmt.Sprintf("❌ Error saving config: %s", html.EscapeString(err.Error())))
-		}
-		if m.k.Config.Piped {
-			return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("piped_on"))
-		}
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID, m.s("piped_off"))
-	}
 
 	switch strings.ToLower(raw) {
 	case "on", "1", "true":
@@ -637,8 +624,8 @@ func (m *settingsModule) cmdPiped(ctx context.Context, ev *events.NewMessage) er
 	case "off", "0", "false":
 		m.k.Config.Piped = false
 	default:
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			m.sf("piped_usage", "{prefix}", html.EscapeString(m.k.Prefix())))
+		// Toggle (Python original behaviour: flip current state).
+		m.k.Config.Piped = !m.k.Config.Piped
 	}
 
 	if err := m.saveConfig(); err != nil {

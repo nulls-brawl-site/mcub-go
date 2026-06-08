@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Port of modules/command.py from MCUB-fork.
-// Handles bot command helpers and userbot init flow.
+//
+// Python command.py is a ModuleBase subclass with ONLY @bot_command handlers:
+//   /start, /profile, /init, /delete_mcub_bot, /ping, /mitrich
+// and callbacks:
+//   cb_language (language selection + backup setup)
+//   cb_backup, cb_backup_interval, cb_backup_skip
+//
+// These require a running bot client, which the current Go kernel does not expose.
+// The one userbot-facing command provided here (.setlang) is a functional equivalent
+// of the cb_language callback: it lets the owner change the kernel language from the
+// userbot account.
 
 package modules
 
@@ -14,10 +24,9 @@ import (
 	"github.com/nulls-brawl-site/telegram-mcub-go/events"
 )
 
-// commandModule provides bot command handlers and userbot init flow.
-// Ported from modules/command.py – only the userbot-side commands are
-// implemented here; the bot-side /start, /profile, /ping etc. require a live
-// bot client which is outside the current Go scope.
+// commandModule provides userbot-side language setup.
+// Bot-side commands (/start, /profile, /init, /ping, /mitrich, /delete_mcub_bot)
+// are defined in Python command.py as @bot_command and require a live bot client.
 type commandModule struct {
 	k *kernel.Kernel
 }
@@ -53,56 +62,34 @@ func (m *commandModule) OnUnload(k interface{}) error {
 }
 
 // Commands implements loader.Module.
+// Python command.py exposes no userbot (.command) handlers; all commands are
+// @bot_command.  The single .setlang command here mirrors what the cb_language
+// callback does in Python (sets kernel language and saves config).
 func (m *commandModule) Commands() []loader.Command {
 	return []loader.Command{
 		{
-			Name:        "botsetup",
-			Description: "Show inline bot configuration status",
-			Handler:     m.cmdBotSetup,
-		},
-		{
 			Name:        "setlang",
-			Description: "Show or change the userbot language",
+			Description: "Show or change the userbot language (equivalent to /init language callback)",
 			Handler:     m.cmdSetlang,
 		},
 	}
 }
 
-// cmdBotSetup checks and shows the inline bot configuration status.
-// Mirrors command.py cmdBotSetup / /init handling for the userbot side.
-func (m *commandModule) cmdBotSetup(ctx context.Context, ev *events.NewMessage) error {
-	if m.k == nil || ev == nil || ev.Raw == nil {
-		return nil
-	}
-	if m.k.Config.InlineBotToken == nil {
-		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			`⚙️ <b>Inline Bot</b>`+"\n"+
-				`<blockquote>Not configured.`+"\n"+
-				`Set <code>inline_bot_token</code> in config.json</blockquote>`)
-	}
-	token := *m.k.Config.InlineBotToken
-	masked := token
-	if len(token) > 15 {
-		masked = token[:10] + "..." + token[len(token)-5:]
-	}
-	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf(`⚙️ <b>Inline Bot</b>`+"\n"+
-			`<blockquote>Token: <code>%s</code>`+"\n"+
-			`Status: Configured</blockquote>`, masked))
-}
-
-// cmdSetlang is a quick language-switcher shortcut.
-// With no args it shows the current language; with an arg it sets it and saves
-// config. Mirrors the language callback in command.py cb_language.
+// cmdSetlang shows the current language or sets a new one.
+// Mirrors the Python cb_language callback which sets kernel.config["language"]
+// and calls kernel.save_config().
 func (m *commandModule) cmdSetlang(ctx context.Context, ev *events.NewMessage) error {
 	if m.k == nil || ev == nil || ev.Raw == nil {
 		return nil
 	}
 	args := strings.TrimSpace(getArgsRaw(ev, m.k))
 	if args == "" {
+		// Python cb_language sends hello_installed + main_commands on setup.
+		// Here we just show the current language since there's no inline bot.
 		return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-			`🌐 <b>Language:</b> <code>`+m.k.GetLanguage()+`</code>`+"\n"+
-				`<blockquote>Available: en, ru, uk, de, es</blockquote>`)
+			fmt.Sprintf(`🌐 <b>%s</b> <code>%s</code>`,
+				s(m.k, "command", "kernel_version"),
+				m.k.GetLanguage()))
 	}
 	lang := args
 	m.k.Config.Language = lang
@@ -112,5 +99,5 @@ func (m *commandModule) cmdSetlang(ctx context.Context, ev *events.NewMessage) e
 		}
 	}
 	return editHTML(ctx, m.k, ev.PeerID, ev.Raw.ID,
-		fmt.Sprintf(`✅ Language set to <code>%s</code>`, lang))
+		sf(m.k, "settings", "lang_changed", map[string]interface{}{"lang": lang}))
 }
